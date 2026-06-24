@@ -1,4 +1,5 @@
 from functools import lru_cache
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -6,8 +7,12 @@ class Settings(BaseSettings):
     APP_NAME: str = "Paisa Vasool Dispute Service"
     ENVIRONMENT: str = "local"
 
-    DB_ASYNC_URL: str = "postgresql+asyncpg://paisavasool:paisavasool@postgres:5432/paisavasool"
-    DB_SYNC_URL: str = "postgresql+psycopg2://paisavasool:paisavasool@postgres:5432/paisavasool"
+    DB_ASYNC_URL: str = (
+        "postgresql+asyncpg://paisavasool:paisavasool@postgres:5432/paisavasool"
+    )
+    DB_SYNC_URL: str = (
+        "postgresql+psycopg2://paisavasool:paisavasool@postgres:5432/paisavasool"
+    )
     REDIS_URL: str = "redis://redis:6379/0"
 
     SECRET_KEY: str = "ilovepaisavasool"

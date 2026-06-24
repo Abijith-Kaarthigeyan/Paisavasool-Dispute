@@ -15,12 +15,18 @@ class DisputeCommunication(Base):
     recipient: Mapped[str] = mapped_column(String(255), nullable=False)
     subject: Mapped[str] = mapped_column(String(255), nullable=False)
     body: Mapped[str] = mapped_column(Text, nullable=False)
-    communication_type: Mapped[str] = mapped_column(String(50), nullable=False)  # CUSTOMER, INTERNAL
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    communication_type: Mapped[str] = mapped_column(
+        String(50), nullable=False
+    )  # CUSTOMER, INTERNAL
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
 
     # Soft Delete / Data Retention
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     deleted_by: Mapped[UUID | None] = mapped_column(nullable=True)
 
     dispute = relationship("Dispute", back_populates="communications")

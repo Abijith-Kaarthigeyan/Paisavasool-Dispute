@@ -1,6 +1,6 @@
-import asyncio
-from datetime import datetime, timezone, timedelta
-from uuid import UUID, uuid4
+from datetime import UTC, datetime, timedelta
+from uuid import uuid4
+
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -9,9 +9,7 @@ from src.core.services.assignment_service import AssignmentService
 from src.core.services.audit_service import AuditService
 from src.core.services.correlation_service import CorrelationService
 from src.core.services.escalation_service import EscalationService
-from src.core.services.recommendation_service import RecommendationService
 from src.core.services.sla_service import SLAService
-from src.core.services.workflow_context_service import WorkflowContextService
 from src.data.repositories import (
     ActivityRepository,
     AssignmentRepository,
@@ -20,10 +18,8 @@ from src.data.repositories import (
     CommunicationRepository,
     DisputeRepository,
     EscalationRepository,
-    RecommendationRepository,
     SLARepository,
     UserRepository,
-    WorkflowContextRepository,
 )
 
 
@@ -102,7 +98,7 @@ async def test_sla_pause_and_resume(db_session: AsyncSession):
     assert sla.paused_at is not None
 
     # Simulate passing of time in pause (mock paused_at to be 30 minutes ago)
-    sla.paused_at = datetime.now(timezone.utc) - timedelta(minutes=30)
+    sla.paused_at = datetime.now(UTC) - timedelta(minutes=30)
     await sla_repo.update_sla(sla)
 
     # 3. Transition back to IN_REVIEW (Resume)
@@ -123,7 +119,9 @@ async def test_escalation_rules(db_session: AsyncSession, seed_users):
 
     audit_service = AuditService(activity_repo)
     sla_service = SLAService(sla_repo, dispute_repo, audit_service, settings)
-    escalation_service = EscalationService(escalation_repo, sla_repo, dispute_repo, audit_service)
+    escalation_service = EscalationService(
+        escalation_repo, sla_repo, dispute_repo, audit_service
+    )
 
     case = await case_repo.create_case(
         case_number=f"CASE-{uuid4().hex[:6].upper()}",
@@ -149,7 +147,7 @@ async def test_escalation_rules(db_session: AsyncSession, seed_users):
     sla = await sla_service.create_sla(dispute.id)
 
     # Mock started_at to simulate 85% elapsed time (24 hours SLA = 1440 mins. 85% = 1224 mins)
-    sla.started_at = datetime.now(timezone.utc) - timedelta(minutes=1224)
+    sla.started_at = datetime.now(UTC) - timedelta(minutes=1224)
     await sla_repo.update_sla(sla)
 
     # Calculate progress and run escalations
@@ -163,7 +161,7 @@ async def test_escalation_rules(db_session: AsyncSession, seed_users):
     assert escalations[0].escalated_to == associate.id
 
     # Mock started_at to simulate 105% elapsed time (1512 mins)
-    sla.started_at = datetime.now(timezone.utc) - timedelta(minutes=1512)
+    sla.started_at = datetime.now(UTC) - timedelta(minutes=1512)
     await sla_repo.update_sla(sla)
 
     # Recalculate
@@ -190,7 +188,9 @@ async def test_correlation_engine(db_session: AsyncSession):
     activity_repo = ActivityRepository(db_session)
 
     audit_service = AuditService(activity_repo)
-    correlation_service = CorrelationService(dispute_repo, comm_repo, comment_repo, audit_service)
+    correlation_service = CorrelationService(
+        dispute_repo, comm_repo, comment_repo, audit_service
+    )
 
     case = await case_repo.create_case(
         case_number=f"CASE-{uuid4().hex[:6].upper()}",
@@ -234,7 +234,9 @@ async def test_assignment_service(db_session: AsyncSession, seed_users):
     user_repo = UserRepository(db_session)
 
     audit_service = AuditService(activity_repo)
-    assign_service = AssignmentService(dispute_repo, assign_repo, user_repo, audit_service)
+    assign_service = AssignmentService(
+        dispute_repo, assign_repo, user_repo, audit_service
+    )
 
     case = await case_repo.create_case(
         case_number=f"CASE-{uuid4().hex[:6].upper()}",

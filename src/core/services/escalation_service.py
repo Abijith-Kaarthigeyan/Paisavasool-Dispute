@@ -1,6 +1,9 @@
 from uuid import UUID
 
-from src.core.exceptions.business_exceptions import EscalationException, ValidationException
+from src.core.exceptions.business_exceptions import (
+    EscalationException,
+    ValidationException,
+)
 from src.core.services.audit_service import AuditService
 from src.data.repositories.dispute_repository import DisputeRepository
 from src.data.repositories.escalation_repository import EscalationRepository
@@ -30,15 +33,21 @@ class EscalationService:
         if not sla:
             return  # No SLA created yet
 
-        existing_escalations = await self.escalation_repo.get_escalations_for_dispute(dispute_id)
+        existing_escalations = await self.escalation_repo.get_escalations_for_dispute(
+            dispute_id
+        )
         existing_levels = {esc.level for esc in existing_escalations}
 
         # Level 1 Escalation: SLA status is AT_RISK or BREACHED (at >= 80%), assign L1 if not already triggered
-        if (sla.status in ["AT_RISK", "BREACHED"] or sla.current_percentage >= 80.0) and 1 not in existing_levels:
+        if (
+            sla.status in ["AT_RISK", "BREACHED"] or sla.current_percentage >= 80.0
+        ) and 1 not in existing_levels:
             # Escalates to associate
             escalated_to = dispute.assigned_to
             if not escalated_to:
-                raise EscalationException("Cannot escalate L1: No associate assigned to dispute.")
+                raise EscalationException(
+                    "Cannot escalate L1: No associate assigned to dispute."
+                )
 
             await self.escalation_repo.create_escalation(
                 dispute_id=dispute_id,
@@ -54,7 +63,9 @@ class EscalationService:
             )
 
         # Level 2 Escalation: SLA status is BREACHED (at >= 100%), assign L2 if not already triggered
-        if (sla.status == "BREACHED" or sla.current_percentage >= 100.0) and 2 not in existing_levels:
+        if (
+            sla.status == "BREACHED" or sla.current_percentage >= 100.0
+        ) and 2 not in existing_levels:
             # Escalates to manager
             escalated_to = dispute.manager_id
             if not escalated_to:
@@ -62,7 +73,9 @@ class EscalationService:
                 escalated_to = dispute.assigned_to
 
             if not escalated_to:
-                raise EscalationException("Cannot escalate L2: No assignee/manager to escalate to.")
+                raise EscalationException(
+                    "Cannot escalate L2: No assignee/manager to escalate to."
+                )
 
             await self.escalation_repo.create_escalation(
                 dispute_id=dispute_id,
@@ -91,7 +104,7 @@ class EscalationService:
                 action="ESCALATED",
                 metadata={"level": 2, "escalated_to": str(escalated_to)},
             )
-        
+
     async def resolve_escalations(self, dispute_id: UUID) -> None:
         """Marks all active escalations on a dispute as resolved (e.g. when dispute is resolved/closed)."""
         escalations = await self.escalation_repo.get_escalations_for_dispute(dispute_id)
@@ -100,7 +113,7 @@ class EscalationService:
                 esc.resolved = True
                 # Trigger db flush through repo update wrapper (or direct session update since we track session)
                 await self.dispute_repo.db.flush()
-        
+
         await self.audit_service.log_event(
             dispute_id=dispute_id,
             action="ESCALATIONS_RESOLVED",

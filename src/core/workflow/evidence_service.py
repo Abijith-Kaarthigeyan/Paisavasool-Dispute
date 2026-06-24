@@ -1,6 +1,6 @@
 """Evidence snapshot service for capturing reproducibility data of disputes."""
 
-from typing import Any, Dict
+from typing import Any
 from uuid import UUID
 
 from src.data.repositories.other_repositories import EvidenceSnapshotRepository
@@ -16,9 +16,9 @@ class EvidenceSnapshotService:
         self,
         *,
         dispute_id: UUID,
-        email_snapshot: Dict[str, Any],
-        invoice_snapshot: Dict[str, Any],
-        validation_snapshot: Dict[str, Any],
+        email_snapshot: dict[str, Any],
+        invoice_snapshot: dict[str, Any],
+        validation_snapshot: dict[str, Any],
     ) -> None:
         """Saves customer email, invoice details, and validation logs to snapshots."""
         await self.snapshot_repo.create_evidence_snapshot(

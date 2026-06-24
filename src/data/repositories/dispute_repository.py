@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import and_, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
@@ -28,8 +28,7 @@ class DisputeRepository:
 
     async def get_by_dispute_number(self, dispute_number: str) -> Dispute | None:
         result = await self.db.execute(
-            select(Dispute)
-            .where(
+            select(Dispute).where(
                 Dispute.dispute_number == dispute_number,
                 Dispute.is_deleted.is_(False),
             )

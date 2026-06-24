@@ -1,4 +1,5 @@
 from typing import Any
+
 from celery import Celery
 from celery.schedules import crontab
 from celery.signals import worker_process_init
@@ -46,4 +47,3 @@ celery_app.conf.update(
         },
     },
 )
-

@@ -3,7 +3,8 @@
 import json
 import re
 import time
-from typing import Any, Dict
+from typing import Any
+
 import httpx
 
 from src.core.config.settings import settings
@@ -14,13 +15,15 @@ class AmendmentResolutionAgent:
     """LLM-based agent evaluating customer claims against invoice details."""
 
     @classmethod
-    def _regex_fallback(cls, raw_customer_text: str, invoice_json: dict) -> Dict[str, Any]:
+    def _regex_fallback(
+        cls, raw_customer_text: str, invoice_json: dict
+    ) -> dict[str, Any]:
         """Deterministic fallback when LLM is offline or key missing."""
         logger.info("Executing regex/fallback amendment resolution parser")
-        
+
         # Simple heuristic fallback
         text_lower = raw_customer_text.lower()
-        
+
         # Default decision is to ask for clarification
         outcome = "NEED_MORE_INFO"
         confidence = 75.0
@@ -34,12 +37,12 @@ class AmendmentResolutionAgent:
         elif "tax" in text_lower:
             outcome = "NEED_MORE_INFO"
             reasoning = "Customer claims tax calculation is incorrect. Reviewing tax rules. (fallback)"
-        
+
         return {
             "resolution_outcome": outcome,
             "confidence": confidence,
             "reasoning": reasoning,
-            "recommended_invoice_json": recommended_invoice
+            "recommended_invoice_json": recommended_invoice,
         }
 
     @classmethod
@@ -48,7 +51,7 @@ class AmendmentResolutionAgent:
         raw_customer_text: str,
         invoice_json: dict,
         dispute_category: str,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Compares customer claims against invoice and decides CORRECT/INCORRECT/NEED_MORE_INFO.
 
         Returns:
@@ -90,11 +93,19 @@ Expected JSON Schema:
             ("qwen/qwen-2.5-72b-instruct", "OpenRouter"),
         ]
 
-        if openrouter_key and not openrouter_key.startswith("mock-") and openrouter_key.strip():
+        if (
+            openrouter_key
+            and not openrouter_key.startswith("mock-")
+            and openrouter_key.strip()
+        ):
             for model, provider in models_to_try:
                 start_time = time.time()
                 try:
-                    logger.info("Attempting amendment resolution with %s model: %s", provider, model)
+                    logger.info(
+                        "Attempting amendment resolution with %s model: %s",
+                        provider,
+                        model,
+                    )
                     headers = {
                         "Authorization": f"Bearer {openrouter_key.strip()}",
                         "Content-Type": "application/json",
@@ -121,13 +132,22 @@ Expected JSON Schema:
 
                     parsed = cls._clean_and_parse_json(content)
                     return {
-                        "resolution_outcome": parsed.get("resolution_outcome", "NEED_MORE_INFO"),
+                        "resolution_outcome": parsed.get(
+                            "resolution_outcome", "NEED_MORE_INFO"
+                        ),
                         "confidence": float(parsed.get("confidence", 90.0)),
                         "reasoning": parsed.get("reasoning", ""),
-                        "recommended_invoice_json": parsed.get("recommended_invoice_json") if parsed.get("resolution_outcome") == "CUSTOMER_CORRECT" else None,
+                        "recommended_invoice_json": parsed.get(
+                            "recommended_invoice_json"
+                        )
+                        if parsed.get("resolution_outcome") == "CUSTOMER_CORRECT"
+                        else None,
                         "agent_run_details": {
                             "prompt": prompt,
-                            "input_payload": {"raw_customer_text": raw_customer_text, "invoice_json": invoice_json},
+                            "input_payload": {
+                                "raw_customer_text": raw_customer_text,
+                                "invoice_json": invoice_json,
+                            },
                             "output_payload": parsed,
                             "latency": latency,
                             "model": model,
@@ -136,14 +156,19 @@ Expected JSON Schema:
                         },
                     }
                 except Exception as e:
-                    logger.warning("Amendment resolution failed with model %s: %s", model, str(e))
+                    logger.warning(
+                        "Amendment resolution failed with model %s: %s", model, str(e)
+                    )
 
         if gemini_key and not gemini_key.startswith("mock-") and gemini_key.strip():
             start_time = time.time()
             model = settings.GEMINI_MODEL_NAME
             provider = "Direct Gemini"
             try:
-                logger.info("Attempting amendment resolution with direct Gemini model: %s", model)
+                logger.info(
+                    "Attempting amendment resolution with direct Gemini model: %s",
+                    model,
+                )
                 url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={gemini_key.strip()}"
                 payload = {
                     "contents": [{"parts": [{"text": prompt}]}],
@@ -156,20 +181,29 @@ Expected JSON Schema:
                     resp = await client.post(url, json=payload, timeout=15.0)
                     resp.raise_for_status()
                     result_json = resp.json()
-                    content = result_json["candidates"][0]["content"]["parts"][0]["text"]
+                    content = result_json["candidates"][0]["content"]["parts"][0][
+                        "text"
+                    ]
 
                 latency = time.time() - start_time
                 logger.info("Direct Gemini amendment resolution succeeded.")
 
                 parsed = cls._clean_and_parse_json(content)
                 return {
-                    "resolution_outcome": parsed.get("resolution_outcome", "NEED_MORE_INFO"),
+                    "resolution_outcome": parsed.get(
+                        "resolution_outcome", "NEED_MORE_INFO"
+                    ),
                     "confidence": float(parsed.get("confidence", 90.0)),
                     "reasoning": parsed.get("reasoning", ""),
-                    "recommended_invoice_json": parsed.get("recommended_invoice_json") if parsed.get("resolution_outcome") == "CUSTOMER_CORRECT" else None,
+                    "recommended_invoice_json": parsed.get("recommended_invoice_json")
+                    if parsed.get("resolution_outcome") == "CUSTOMER_CORRECT"
+                    else None,
                     "agent_run_details": {
                         "prompt": prompt,
-                        "input_payload": {"raw_customer_text": raw_customer_text, "invoice_json": invoice_json},
+                        "input_payload": {
+                            "raw_customer_text": raw_customer_text,
+                            "invoice_json": invoice_json,
+                        },
                         "output_payload": parsed,
                         "latency": latency,
                         "model": model,
@@ -192,7 +226,10 @@ Expected JSON Schema:
             "recommended_invoice_json": fallback_res["recommended_invoice_json"],
             "agent_run_details": {
                 "prompt": prompt,
-                "input_payload": {"raw_customer_text": raw_customer_text, "invoice_json": invoice_json},
+                "input_payload": {
+                    "raw_customer_text": raw_customer_text,
+                    "invoice_json": invoice_json,
+                },
                 "output_payload": fallback_res,
                 "latency": latency,
                 "model": "regex_fallback",
@@ -202,7 +239,7 @@ Expected JSON Schema:
         }
 
     @classmethod
-    def _clean_and_parse_json(cls, content: str) -> Dict[str, Any]:
+    def _clean_and_parse_json(cls, content: str) -> dict[str, Any]:
         """Cleans potential markdown blocks and parses JSON string."""
         cleaned = content.strip()
         if cleaned.startswith("```"):

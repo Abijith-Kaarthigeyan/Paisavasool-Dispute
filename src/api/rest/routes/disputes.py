@@ -1,29 +1,29 @@
-from uuid import UUID, uuid4
-from pydantic import BaseModel
-from sqlalchemy import text
+import contextlib
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.dependencies import (
     get_activity_repository,
     get_comment_repository,
-    get_dispute_repository,
-    get_workflow_context_service,
-    get_resume_service,
-    get_interrupt_service,
-    get_workflow_context_repository,
     get_communication_repository,
-    get_evidence_snapshot_repository,
+    get_dispute_repository,
+    get_interrupt_service,
+    get_resume_service,
     get_sla_repository,
+    get_workflow_context_repository,
 )
 from src.core.security.dependencies import require_finance
-from src.core.services.workflow_context_service import WorkflowContextService
-from src.core.workflow.resume_service import DisputeResumeService
 from src.core.workflow.interrupt_service import WorkflowInterruptService
+from src.core.workflow.resume_service import DisputeResumeService
 from src.data.clients.postgres_client import get_async_db
-from src.data.repositories.other_repositories import ActivityRepository, CommentRepository
 from src.data.repositories.dispute_repository import DisputeRepository
+from src.data.repositories.other_repositories import (
+    ActivityRepository,
+    CommentRepository,
+)
 from src.schemas.auth import TokenPayload
 from src.schemas.dispute import (
     DisputeActivityResponse,
@@ -144,11 +144,16 @@ async def resume_dispute_workflow(
     db: AsyncSession = Depends(get_async_db),
 ):
     """Resumes execution of the dispute workflow from the last checkpoint."""
-    from src.data.repositories.workflow_context_repository import WorkflowContextRepository
+    from src.data.repositories.workflow_context_repository import (
+        WorkflowContextRepository,
+    )
+
     context_repo = WorkflowContextRepository(db)
     context = await context_repo.get_by_dispute_id(id)
     if not context:
-        raise HTTPException(status_code=404, detail="No active workflow context found for dispute.")
+        raise HTTPException(
+            status_code=404, detail="No active workflow context found for dispute."
+        )
 
     state_updates = {
         "requires_human_review": False,
@@ -170,7 +175,7 @@ async def resume_dispute_workflow(
                 "dispute_id": str(context.dispute_id),
                 "workflow_name": context.workflow_name,
                 "current_node": context.current_node,
-            }
+            },
         }
     except Exception as e:
         # It's normal to catch NodeInterrupt if the graph is paused again at a subsequent node
@@ -182,7 +187,7 @@ async def resume_dispute_workflow(
                 "dispute_id": str(context.dispute_id),
                 "workflow_name": context.workflow_name,
                 "current_node": context.current_node,
-            }
+            },
         }
 
 
@@ -197,14 +202,18 @@ async def submit_associate_decision(
 ):
     """Submits Associate Approval (APPROVE/REJECT) and resumes the workflow."""
     if payload.decision.upper() not in ["APPROVE", "REJECT"]:
-        raise HTTPException(status_code=400, detail="Invalid decision. Must be APPROVE or REJECT.")
+        raise HTTPException(
+            status_code=400, detail="Invalid decision. Must be APPROVE or REJECT."
+        )
 
     dispute = await dispute_repo.get_by_id(id)
     if not dispute:
         raise HTTPException(status_code=404, detail="Dispute not found.")
 
     # 1. Persist decision
-    comment_text = f"Associate Decision: {payload.decision}. Comments: {payload.comments or ''}"
+    comment_text = (
+        f"Associate Decision: {payload.decision}. Comments: {payload.comments or ''}"
+    )
     comment_repo = CommentRepository(db)
     await comment_repo.create_comment(
         dispute_id=id,
@@ -228,15 +237,13 @@ async def submit_associate_decision(
         "requires_human_review": False,
         "review_reason": None,
     }
-    try:
+    with contextlib.suppress(Exception):
         await resume_service.resume_workflow(
             db=db,
             dispute_id=id,
             state_updates=state_updates,
             as_node="waiting_approval_node",
         )
-    except Exception:
-        pass
 
     return {"status": "SUCCESS", "message": "Decision processed and workflow resumed."}
 
@@ -252,7 +259,10 @@ async def submit_payment_review_decision(
 ):
     """Submits Payment Review decision and resumes the workflow."""
     if payload.decision.upper() not in ["SETTLEMENT_DONE", "SETTLEMENT_NOT_DONE"]:
-        raise HTTPException(status_code=400, detail="Invalid decision. Must be SETTLEMENT_DONE or SETTLEMENT_NOT_DONE.")
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid decision. Must be SETTLEMENT_DONE or SETTLEMENT_NOT_DONE.",
+        )
 
     dispute = await dispute_repo.get_by_id(id)
     if not dispute:
@@ -281,15 +291,13 @@ async def submit_payment_review_decision(
         "requires_human_review": False,
         "review_reason": None,
     }
-    try:
+    with contextlib.suppress(Exception):
         await resume_service.resume_workflow(
             db=db,
             dispute_id=id,
             state_updates=state_updates,
             as_node="waiting_resolution_node",
         )
-    except Exception:
-        pass
 
     return {"status": "SUCCESS", "message": "Decision processed and workflow resumed."}
 
@@ -305,7 +313,10 @@ async def submit_operational_review_decision(
 ):
     """Submits Operational Review decision and resumes the workflow."""
     if payload.decision.upper() not in ["ACKNOWLEDGED", "REJECTED"]:
-        raise HTTPException(status_code=400, detail="Invalid decision. Must be ACKNOWLEDGED or REJECTED.")
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid decision. Must be ACKNOWLEDGED or REJECTED.",
+        )
 
     dispute = await dispute_repo.get_by_id(id)
     if not dispute:
@@ -334,15 +345,13 @@ async def submit_operational_review_decision(
         "requires_human_review": False,
         "review_reason": None,
     }
-    try:
+    with contextlib.suppress(Exception):
         await resume_service.resume_workflow(
             db=db,
             dispute_id=id,
             state_updates=state_updates,
             as_node="waiting_resolution_node",
         )
-    except Exception:
-        pass
 
     return {"status": "SUCCESS", "message": "Decision processed and workflow resumed."}
 
@@ -351,7 +360,7 @@ async def submit_operational_review_decision(
 async def get_dispute_workflow_context(
     id: UUID,
     current_user: TokenPayload = Depends(require_finance),
-    context_repo = Depends(get_workflow_context_repository),
+    context_repo=Depends(get_workflow_context_repository),
 ):
     """Fetches the workflow context for a dispute."""
     context = await context_repo.get_by_dispute_id(id)
@@ -364,7 +373,7 @@ async def get_dispute_workflow_context(
 async def get_dispute_communications(
     id: UUID,
     current_user: TokenPayload = Depends(require_finance),
-    comm_repo = Depends(get_communication_repository),
+    comm_repo=Depends(get_communication_repository),
 ):
     """Fetches communications history for a dispute."""
     comms = await comm_repo.get_communications_for_dispute(id)
@@ -378,8 +387,10 @@ async def get_dispute_evidence(
     db: AsyncSession = Depends(get_async_db),
 ):
     """Fetches evidence snapshots for a dispute."""
-    from src.data.models.postgres.evidence_snapshot import DisputeEvidenceSnapshot
     from sqlalchemy import select
+
+    from src.data.models.postgres.evidence_snapshot import DisputeEvidenceSnapshot
+
     result = await db.execute(
         select(DisputeEvidenceSnapshot).where(
             DisputeEvidenceSnapshot.dispute_id == id,
@@ -394,7 +405,7 @@ async def get_dispute_evidence(
 async def get_dispute_sla(
     id: UUID,
     current_user: TokenPayload = Depends(require_finance),
-    sla_repo = Depends(get_sla_repository),
+    sla_repo=Depends(get_sla_repository),
 ):
     """Fetches SLA details for a dispute."""
     sla = await sla_repo.get_by_dispute_id(id)

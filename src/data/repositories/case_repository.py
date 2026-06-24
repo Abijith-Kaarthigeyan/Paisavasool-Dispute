@@ -24,8 +24,7 @@ class CaseRepository:
 
     async def get_by_case_number(self, case_number: str) -> DisputeCase | None:
         result = await self.db.execute(
-            select(DisputeCase)
-            .where(
+            select(DisputeCase).where(
                 DisputeCase.case_number == case_number,
                 DisputeCase.is_deleted.is_(False),
             )

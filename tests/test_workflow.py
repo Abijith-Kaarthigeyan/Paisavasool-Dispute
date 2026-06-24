@@ -1,31 +1,20 @@
 """Pytest suite for dispute management workflow, agents, and APIs."""
 
-import asyncio
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
 import pytest
-from httpx import AsyncClient, HTTPStatusError, Response
+from httpx import AsyncClient, Response
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.core.workflow.graph import get_graph, dispute_generation_node
+from src.core.workflow.graph import dispute_generation_node, get_graph
 from src.core.workflow.triage_agent import DisputeTriageAgent
-from src.core.workflow.resume_service import DisputeResumeService
-from src.core.workflow.interrupt_service import WorkflowInterruptService
-from src.core.workflow.evidence_service import EvidenceSnapshotService
-from src.data.models.postgres.case import DisputeCase
-from src.data.models.postgres.dispute import Dispute
-from src.data.models.postgres.review_queue import DisputeReviewQueue
 from src.data.repositories.case_repository import CaseRepository
 from src.data.repositories.dispute_repository import DisputeRepository
 from src.data.repositories.review_queue_repository import ReviewQueueRepository
 from src.data.repositories.workflow_context_repository import WorkflowContextRepository
-from src.data.repositories.other_repositories import (
-    ActivityRepository,
-    EvidenceSnapshotRepository,
-)
 
 
 @pytest.fixture
@@ -34,13 +23,7 @@ def mock_openrouter_success():
     mock_resp = MagicMock(spec=Response)
     mock_resp.status_code = 200
     mock_resp.json.return_value = {
-        "choices": [
-            {
-                "message": {
-                    "content": json_payload_str()
-                }
-            }
-        ]
+        "choices": [{"message": {"content": json_payload_str()}}]
     }
     return mock_resp
 
@@ -66,22 +49,28 @@ def json_payload_str():
 @pytest.mark.asyncio
 async def test_triage_agent_normal_flow(mock_openrouter_success):
     """Tests the triage agent extracts invoices and categories correctly using mocked OpenRouter."""
-    with patch("httpx.AsyncClient.post", new_callable=AsyncMock, return_value=mock_openrouter_success):
-        with patch("src.core.config.settings.settings.OPENROUTER_API_KEY", "real-mock-key"):
-            res = await DisputeTriageAgent.triage_communication(
-                subject="Dispute for invoice",
-                body="Invoice INV-1001 pricing is wrong and INV-2001 was already paid.",
-            )
+    with (
+        patch(
+            "httpx.AsyncClient.post",
+            new_callable=AsyncMock,
+            return_value=mock_openrouter_success,
+        ),
+        patch("src.core.config.settings.settings.OPENROUTER_API_KEY", "real-mock-key"),
+    ):
+        res = await DisputeTriageAgent.triage_communication(
+            subject="Dispute for invoice",
+            body="Invoice INV-1001 pricing is wrong and INV-2001 was already paid.",
+        )
 
-            assert res["confidence"] == 95.0
-            assert len(res["invoices"]) == 2
-            
-            # pricing & tax must collapse to AMENDMENT
-            inv1 = next(i for i in res["invoices"] if i["invoice_number"] == "INV-1001")
-            assert "AMENDMENT" in inv1["dispute_types"]
+        assert res["confidence"] == 95.0
+        assert len(res["invoices"]) == 2
 
-            inv2 = next(i for i in res["invoices"] if i["invoice_number"] == "INV-2001")
-            assert "PAYMENT_ALREADY_DONE" in inv2["dispute_types"]
+        # pricing & tax must collapse to AMENDMENT
+        inv1 = next(i for i in res["invoices"] if i["invoice_number"] == "INV-1001")
+        assert "AMENDMENT" in inv1["dispute_types"]
+
+        inv2 = next(i for i in res["invoices"] if i["invoice_number"] == "INV-2001")
+        assert "PAYMENT_ALREADY_DONE" in inv2["dispute_types"]
 
 
 @pytest.mark.asyncio
@@ -151,17 +140,25 @@ async def test_case_intake_idempotency(db_session: AsyncSession):
 
 
 @pytest.mark.asyncio
-async def test_dispute_generation_and_sla_creation(db_session: AsyncSession, seed_users):
+async def test_dispute_generation_and_sla_creation(
+    db_session: AsyncSession, seed_users
+):
     """Tests dispute generation node creates dispute, SLA, and triggers assignment."""
-    is_sqlite = (db_session.bind.dialect.name == "sqlite")
+    is_sqlite = db_session.bind.dialect.name == "sqlite"
     table_name = "invoices" if is_sqlite else "ar.invoices"
     now_func = "datetime('now')" if is_sqlite else "NOW()"
     invoice_id = uuid4()
     customer_id = uuid4()
     await db_session.execute(
-        text(f"INSERT INTO {table_name} (id, invoice_number, customer_id, invoice_date, due_date, currency, subtotal_amount, tax_amount, total_amount, outstanding_amount, status, batch_id, is_deleted, created_at, updated_at) "
-             f"VALUES (:id, 'INV-1001', :cust_id, '2026-01-01', '2026-01-31', 'INR', 100, 18, 118, 118, 'PENDING', :batch_id, false, {now_func}, {now_func})"),
-        {"id": str(invoice_id) if is_sqlite else invoice_id, "cust_id": str(customer_id) if is_sqlite else customer_id, "batch_id": str(uuid4()) if is_sqlite else uuid4()}
+        text(
+            f"INSERT INTO {table_name} (id, invoice_number, customer_id, invoice_date, due_date, currency, subtotal_amount, tax_amount, total_amount, outstanding_amount, status, batch_id, is_deleted, created_at, updated_at) "
+            f"VALUES (:id, 'INV-1001', :cust_id, '2026-01-01', '2026-01-31', 'INR', 100, 18, 118, 118, 'PENDING', :batch_id, false, {now_func}, {now_func})"
+        ),
+        {
+            "id": str(invoice_id) if is_sqlite else invoice_id,
+            "cust_id": str(customer_id) if is_sqlite else customer_id,
+            "batch_id": str(uuid4()) if is_sqlite else uuid4(),
+        },
     )
     await db_session.commit()
 
@@ -172,7 +169,7 @@ async def test_dispute_generation_and_sla_creation(db_session: AsyncSession, see
     )
     await db_session.commit()
 
-    graph = get_graph()
+    get_graph()
     config = {
         "configurable": {
             "db": db_session,
@@ -193,7 +190,9 @@ async def test_dispute_generation_and_sla_creation(db_session: AsyncSession, see
 
     # Execute from dispute_generation_node
     # Note: We patch celery process_dispute_workflow task to verify spawning tasks
-    with patch("src.infrastructure.celery.tasks.process_dispute_workflow.delay") as mock_delay:
+    with patch(
+        "src.infrastructure.celery.tasks.process_dispute_workflow.delay"
+    ) as mock_delay:
         await dispute_generation_node(state, config)
         assert mock_delay.call_count == 1
 
@@ -212,12 +211,12 @@ async def test_full_graph_interrupt_and_resume(db_session: AsyncSession, seed_us
     # 1. Create a dispute with missing invoice (triggers validation failure interrupt)
     case_repo = CaseRepository(db_session)
     dispute_repo = DisputeRepository(db_session)
-    
+
     case = await case_repo.create_case(
         case_number=f"CASE-{datetime.now().year}-999003",
         customer_email="customer@example.com",
     )
-    
+
     dispute = await dispute_repo.create_dispute(
         dispute_number=f"DISP-{datetime.now().year}-999003",
         case_id=case.id,
@@ -236,7 +235,7 @@ async def test_full_graph_interrupt_and_resume(db_session: AsyncSession, seed_us
             "thread_id": str(dispute.id),
         }
     }
-    
+
     initial_state = {
         "case_id": dispute.case_id,
         "dispute_id": dispute.id,
@@ -270,33 +269,47 @@ async def test_full_graph_interrupt_and_resume(db_session: AsyncSession, seed_us
 
 
 @pytest.mark.asyncio
-async def test_apis_intake_and_decisions(mock_client: AsyncClient, db_session: AsyncSession, seed_users):
+async def test_apis_intake_and_decisions(
+    mock_client: AsyncClient, db_session: AsyncSession, seed_users
+):
     """Tests the API endpoints for cases intake and associate approval decisions."""
     triage_mock_val = {
         "invoices": [{"invoice_number": "INV-1001", "dispute_types": ["AMENDMENT"]}],
         "confidence": 95.0,
     }
 
-    with patch("src.core.workflow.triage_agent.DisputeTriageAgent.triage_communication", new_callable=AsyncMock, return_value=triage_mock_val):
-        with patch("src.infrastructure.celery.tasks.process_dispute_case.delay") as mock_delay:
-            # POST /cases/intake
-            headers = {"Authorization": "Bearer mock-finance-token"}
-            payload = {
-                "customer_email": "customer@example.com",
-                "email_subject": "Pricing Dispute",
-                "email_body": "Please review invoice INV-1001.",
-                "message_id": f"msg-{uuid4().hex}",
-            }
-            resp = await mock_client.post("/api/v1/cases/intake", json=payload, headers=headers)
-            assert resp.status_code == 201
-            assert resp.json()["status"] == "QUEUED"
-            case_id = UUID(resp.json()["case_id"])
-            assert mock_delay.call_count == 1
+    with (
+        patch(
+            "src.core.workflow.triage_agent.DisputeTriageAgent.triage_communication",
+            new_callable=AsyncMock,
+            return_value=triage_mock_val,
+        ),
+        patch(
+            "src.infrastructure.celery.tasks.process_dispute_case.delay"
+        ) as mock_delay,
+    ):
+        # POST /cases/intake
+        headers = {"Authorization": "Bearer mock-finance-token"}
+        payload = {
+            "customer_email": "customer@example.com",
+            "email_subject": "Pricing Dispute",
+            "email_body": "Please review invoice INV-1001.",
+            "message_id": f"msg-{uuid4().hex}",
+        }
+        resp = await mock_client.post(
+            "/api/v1/cases/intake", json=payload, headers=headers
+        )
+        assert resp.status_code == 201
+        assert resp.json()["status"] == "QUEUED"
+        case_id = UUID(resp.json()["case_id"])
+        assert mock_delay.call_count == 1
 
-            # GET /cases/{id}/disputes
-            resp = await mock_client.get(f"/api/v1/cases/{case_id}/disputes", headers=headers)
-            assert resp.status_code == 200
-            assert isinstance(resp.json(), list)
+        # GET /cases/{id}/disputes
+        resp = await mock_client.get(
+            f"/api/v1/cases/{case_id}/disputes", headers=headers
+        )
+        assert resp.status_code == 200
+        assert isinstance(resp.json(), list)
 
     # Test Associate Decision API
     dispute_repo = DisputeRepository(db_session)
@@ -316,13 +329,22 @@ async def test_apis_intake_and_decisions(mock_client: AsyncClient, db_session: A
         dispute_id=dispute.id,
         workflow_name="dispute_workflow",
         current_node="waiting_approval_node",
-        workflow_state={"checkpoints": {"chk-1": {"checkpoint": "mock", "metadata": "mock"}}, "latest_checkpoint_id": "chk-1"},
+        workflow_state={
+            "checkpoints": {"chk-1": {"checkpoint": "mock", "metadata": "mock"}},
+            "latest_checkpoint_id": "chk-1",
+        },
     )
     await db_session.commit()
 
     # Mock resume service to avoid full graph execution complications in REST API test
-    with patch("src.core.workflow.resume_service.DisputeResumeService.resume_workflow", new_callable=AsyncMock) as mock_resume:
-        decision_payload = {"decision": "APPROVE", "comments": "Approved associate pricing change."}
+    with patch(
+        "src.core.workflow.resume_service.DisputeResumeService.resume_workflow",
+        new_callable=AsyncMock,
+    ) as mock_resume:
+        decision_payload = {
+            "decision": "APPROVE",
+            "comments": "Approved associate pricing change.",
+        }
         resp = await mock_client.post(
             f"/api/v1/disputes/{dispute.id}/associate-decision",
             json=decision_payload,

@@ -1,17 +1,16 @@
 import asyncio
 from datetime import datetime
 from uuid import UUID, uuid4
+
 import pytest
-from httpx import AsyncClient, ASGITransport
+from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
 from main import app
-from src.core.security.dependencies import get_current_user
-from src.data.clients.postgres_client import get_async_db, Base
+from src.data.clients.postgres_client import Base, get_async_db
 from src.data.models.postgres.user_mapping import RoleMapping, UserMapping
-from src.schemas.auth import RoleName, TokenPayload
 
 # In-memory SQLite async engine for isolated, fast test executions
 TEST_DB_URL = "sqlite+aiosqlite:///:memory:"
@@ -82,10 +81,23 @@ class LockedAsyncSessionProxy:
 
     def __getattr__(self, name):
         attr = getattr(self._session, name)
-        if name in ("execute", "flush", "commit", "rollback", "refresh", "get", "scalar", "scalars", "delete", "merge"):
+        if name in (
+            "execute",
+            "flush",
+            "commit",
+            "rollback",
+            "refresh",
+            "get",
+            "scalar",
+            "scalars",
+            "delete",
+            "merge",
+        ):
+
             async def async_wrapper(*args, **kwargs):
                 async with self._lock:
                     return await attr(*args, **kwargs)
+
             return async_wrapper
         return attr
 
@@ -110,6 +122,7 @@ async def db_session() -> AsyncSession:
 @pytest.fixture(autouse=True)
 def override_db_dependency(db_session: AsyncSession):
     """Overrides the FastAPI DB dependency to inject our isolated session."""
+
     async def _override_db():
         yield db_session
 
@@ -122,7 +135,9 @@ def override_db_dependency(db_session: AsyncSession):
 def mock_auth_service():
     """Mocks calls to the auth service selectively for routing tests."""
     from unittest.mock import MagicMock, patch
+
     import httpx
+
     from src.core.config.settings import settings
 
     original_get = httpx.AsyncClient.get
@@ -149,7 +164,9 @@ def mock_auth_service():
 async def seed_users(db_session: AsyncSession):
     """Seeds RoleMapping and UserMapping records required for testing workload and manager mappings."""
     # Seed roles
-    role_assoc = await db_session.scalar(select(RoleMapping).where(RoleMapping.role_name == "FINANCE_ASSOCIATE"))
+    role_assoc = await db_session.scalar(
+        select(RoleMapping).where(RoleMapping.role_name == "FINANCE_ASSOCIATE")
+    )
     if not role_assoc:
         role_assoc = RoleMapping(
             id=uuid4(),
@@ -160,7 +177,9 @@ async def seed_users(db_session: AsyncSession):
         )
         db_session.add(role_assoc)
 
-    role_mgr = await db_session.scalar(select(RoleMapping).where(RoleMapping.role_name == "FINANCE_MANAGER"))
+    role_mgr = await db_session.scalar(
+        select(RoleMapping).where(RoleMapping.role_name == "FINANCE_MANAGER")
+    )
     if not role_mgr:
         role_mgr = RoleMapping(
             id=uuid4(),

@@ -20,7 +20,9 @@ class EscalationRepository:
         )
         return result.scalar_one_or_none()
 
-    async def get_escalations_for_dispute(self, dispute_id: UUID) -> list[DisputeEscalation]:
+    async def get_escalations_for_dispute(
+        self, dispute_id: UUID
+    ) -> list[DisputeEscalation]:
         result = await self.db.execute(
             select(DisputeEscalation).where(
                 DisputeEscalation.dispute_id == dispute_id,

@@ -1,56 +1,52 @@
 """LangGraph orchestration layer for dispute processing."""
 
-import logging
-from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, Literal, Optional
+import json
+from datetime import UTC, datetime, timedelta
+from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import select, text
-from langgraph.graph import END, StateGraph
-from langgraph.errors import NodeInterrupt
-
 from langchain_core.runnables import RunnableConfig
-from src.core.workflow.state import DisputeWorkflowState
-from src.core.workflow.checkpointer import DbWorkflowCheckpointer
-from src.core.workflow.triage_agent import DisputeTriageAgent
-from src.core.workflow.evidence_service import EvidenceSnapshotService
-from src.core.workflow.amendment_agent import AmendmentResolutionAgent
-from src.core.workflow.payment_reference_agent import PaymentReferenceExtractionAgent
-from src.core.workflow.mail_agent import DisputeMailAgent
-import json
-from src.core.services.recommendation_service import RecommendationService
-from src.data.repositories.recommendation_repository import RecommendationRepository
+from langgraph.errors import NodeInterrupt
+from langgraph.graph import END, StateGraph
+from sqlalchemy import select, text
 
+from src.core.config.settings import settings
+from src.core.services.assignment_service import AssignmentService
+from src.core.services.audit_service import AuditService
+from src.core.services.correlation_service import CorrelationService
+from src.core.services.recommendation_service import RecommendationService
+from src.core.services.sla_service import SLAService
+from src.core.workflow.amendment_agent import AmendmentResolutionAgent
+from src.core.workflow.checkpointer import DbWorkflowCheckpointer
+from src.core.workflow.evidence_service import EvidenceSnapshotService
+from src.core.workflow.mail_agent import DisputeMailAgent
+from src.core.workflow.payment_reference_agent import PaymentReferenceExtractionAgent
+from src.core.workflow.state import DisputeWorkflowState
+from src.core.workflow.triage_agent import DisputeTriageAgent
+from src.data.clients.ar_service_client import ARServiceClient
 from src.data.repositories.case_repository import CaseRepository
+from src.data.repositories.communication_repository import CommunicationRepository
 from src.data.repositories.dispute_repository import DisputeRepository
-from src.data.repositories.review_queue_repository import ReviewQueueRepository
 from src.data.repositories.other_repositories import (
     ActivityRepository,
+    AgentRunRepository,
     CommentRepository,
     EvidenceSnapshotRepository,
-    AgentRunRepository,
 )
-from src.data.repositories.communication_repository import CommunicationRepository
-from src.data.repositories.workflow_context_repository import WorkflowContextRepository
-
-from src.core.services.assignment_service import AssignmentService
-from src.core.services.validation_service import ValidationService
-from src.core.services.correlation_service import CorrelationService
-from src.core.services.audit_service import AuditService
-from src.core.services.sla_service import SLAService
-
-from src.data.clients.ar_service_client import ARServiceClient
-from src.core.config.settings import settings
+from src.data.repositories.recommendation_repository import RecommendationRepository
+from src.data.repositories.review_queue_repository import ReviewQueueRepository
 from src.observability.logging.logger import logger
-
 
 # --- NODES ---
 
-async def case_intake_node(state: DisputeWorkflowState, config: RunnableConfig) -> Dict[str, Any]:
+
+async def case_intake_node(
+    state: DisputeWorkflowState, config: RunnableConfig
+) -> dict[str, Any]:
     """Idempotently processes case intake and persists customer communication."""
     logger.info("[Node Start] case_intake_node")
     db = config["configurable"]["db"]
-    
+
     # If dispute_id is set, this is a single dispute workflow resumption/run - bypass intake nodes
     if state.get("dispute_id"):
         logger.info("[Node End] case_intake_node - Bypassed")
@@ -62,24 +58,33 @@ async def case_intake_node(state: DisputeWorkflowState, config: RunnableConfig) 
     # Check if a case with this message_id already exists to ensure idempotency
     if message_id:
         from src.data.models.postgres.case import DisputeCase
+
         result = await db.execute(
             select(DisputeCase).where(
                 DisputeCase.original_message_id == message_id,
-                DisputeCase.is_deleted.is_(False)
+                DisputeCase.is_deleted.is_(False),
             )
         )
         existing_case = result.scalar_one_or_none()
         if existing_case:
             current_thread_id = config["configurable"].get("thread_id")
             if current_thread_id and str(existing_case.id) == current_thread_id:
-                logger.info("Processing current case %s (%s)", existing_case.id, existing_case.case_number)
+                logger.info(
+                    "Processing current case %s (%s)",
+                    existing_case.id,
+                    existing_case.case_number,
+                )
                 return {
                     "case_id": existing_case.id,
                     "workflow_status": "CASE_CREATED",
                     "current_node": "case_intake_node",
                 }
             else:
-                logger.info("Intake Idempotency triggered. Reusing existing case %s (%s)", existing_case.id, existing_case.case_number)
+                logger.info(
+                    "Intake Idempotency triggered. Reusing existing case %s (%s)",
+                    existing_case.id,
+                    existing_case.case_number,
+                )
                 meta = dict(state.get("metadata") or {})
                 meta["is_idempotent_bypass"] = True
                 return {
@@ -110,7 +115,9 @@ async def case_intake_node(state: DisputeWorkflowState, config: RunnableConfig) 
     }
 
 
-async def triage_agent_node(state: DisputeWorkflowState, config: RunnableConfig) -> Dict[str, Any]:
+async def triage_agent_node(
+    state: DisputeWorkflowState, config: RunnableConfig
+) -> dict[str, Any]:
     """Runs the DisputeTriageAgent to extract invoices and categories."""
     logger.info("[Node Start] triage_agent_node")
     if state.get("dispute_id"):
@@ -121,24 +128,33 @@ async def triage_agent_node(state: DisputeWorkflowState, config: RunnableConfig)
     body = state.get("email_body") or ""
     raw_content = state.get("raw_content") or ""
 
-    triage_res = await DisputeTriageAgent.triage_communication(subject, body, raw_content)
-    
+    triage_res = await DisputeTriageAgent.triage_communication(
+        subject, body, raw_content
+    )
+
     # Save the triage execution context in metadata for later persistence into dispute_agent_runs
     metadata = state.get("metadata") or {}
     metadata["triage_run"] = triage_res.get("agent_run_details")
 
-    logger.info("[Node End] triage_agent_node - Extracted %s invoices", len(triage_res["invoices"]))
+    logger.info(
+        "[Node End] triage_agent_node - Extracted %s invoices",
+        len(triage_res["invoices"]),
+    )
     return {
         "invoices": triage_res["invoices"],
         "confidence": triage_res["confidence"],
         "requires_human_review": triage_res["confidence"] < 80.0,
-        "review_reason": "LOW_CONFIDENCE_TRIAGE" if triage_res["confidence"] < 80.0 else None,
+        "review_reason": "LOW_CONFIDENCE_TRIAGE"
+        if triage_res["confidence"] < 80.0
+        else None,
         "metadata": metadata,
         "current_node": "triage_agent_node",
     }
 
 
-async def dispute_generation_node(state: DisputeWorkflowState, config: RunnableConfig) -> Dict[str, Any]:
+async def dispute_generation_node(
+    state: DisputeWorkflowState, config: RunnableConfig
+) -> dict[str, Any]:
     """Creates independent dispute records and schedules Celery task workflows."""
     logger.info("[Node Start] dispute_generation_node")
     if state.get("dispute_id"):
@@ -154,21 +170,22 @@ async def dispute_generation_node(state: DisputeWorkflowState, config: RunnableC
     dispute_repo = DisputeRepository(db)
     activity_repo = ActivityRepository(db)
     agent_run_repo = AgentRunRepository(db)
-    comment_repo = CommentRepository(db)
     from src.data.repositories.sla_repository import SLARepository
+
     sla_repo = SLARepository(db)
-    user_repo = UserRepository(db) if "UserRepository" in globals() else None
 
     # Instantiate services
     audit_service = AuditService(activity_repo)
     sla_service = SLAService(sla_repo, dispute_repo, audit_service, settings)
-    
-    from src.core.services.assignment_service import AssignmentService
+
     from src.data.repositories.assignment_repository import AssignmentRepository
     from src.data.repositories.user_repository import UserRepository
+
     assign_repo = AssignmentRepository(db)
     u_repo = UserRepository(db)
-    assignment_service = AssignmentService(dispute_repo, assign_repo, u_repo, audit_service)
+    assignment_service = AssignmentService(
+        dispute_repo, assign_repo, u_repo, audit_service
+    )
 
     generated_disputes = []
 
@@ -181,15 +198,17 @@ async def dispute_generation_node(state: DisputeWorkflowState, config: RunnableC
         is_sqlite = (db.bind.dialect.name == "sqlite") if db.bind else False
         table_name = "invoices" if is_sqlite else "ar.invoices"
         inv_res = await db.execute(
-            text(f"SELECT id, customer_id, status FROM {table_name} WHERE invoice_number = :num AND is_deleted = false"),
-            {"num": inv_num}
+            text(
+                f"SELECT id, customer_id, status FROM {table_name} WHERE invoice_number = :num AND is_deleted = false"
+            ),
+            {"num": inv_num},
         )
         row = inv_res.first()
         if row:
             invoice_id = UUID(row[0]) if isinstance(row[0], str) else row[0]
             customer_id = UUID(row[1]) if isinstance(row[1], str) else row[1]
             invoice_exists = True
-            invoice_cancelled = (row[2] == "CANCELLED")
+            invoice_cancelled = row[2] == "CANCELLED"
         else:
             # Missing invoice in AR system
             invoice_id = uuid4()
@@ -232,7 +251,9 @@ async def dispute_generation_node(state: DisputeWorkflowState, config: RunnableC
                     input_payload=triage_details.get("input_payload"),
                     status=triage_details.get("status"),
                 )
-                agent_run.started_at =  datetime.now() - timedelta(seconds=(triage_details.get("latency") or 0))
+                agent_run.started_at = datetime.now() - timedelta(
+                    seconds=(triage_details.get("latency") or 0)
+                )
                 agent_run.completed_at = datetime.now()
                 # Store prompt and latency in outputs
                 agent_run.output_payload = {
@@ -274,18 +295,24 @@ async def dispute_generation_node(state: DisputeWorkflowState, config: RunnableC
 
             # 4. Spawns process_dispute_workflow Celery task
             from src.infrastructure.celery.tasks import process_dispute_workflow
+
             process_dispute_workflow.delay(str(dispute.id))
 
             generated_disputes.append(dispute.id)
 
-    logger.info("[Node End] dispute_generation_node - Generated %s disputes", len(generated_disputes))
+    logger.info(
+        "[Node End] dispute_generation_node - Generated %s disputes",
+        len(generated_disputes),
+    )
     return {
         "workflow_status": "DISPUTES_GENERATED",
         "current_node": "dispute_generation_node",
     }
 
 
-async def correlation_node(state: DisputeWorkflowState, config: RunnableConfig) -> Dict[str, Any]:
+async def correlation_node(
+    state: DisputeWorkflowState, config: RunnableConfig
+) -> dict[str, Any]:
     """Correlates dispute details against active dispute workflows."""
     logger.info("[Node Start] correlation_node")
     if not state.get("dispute_id"):
@@ -318,19 +345,26 @@ async def correlation_node(state: DisputeWorkflowState, config: RunnableConfig) 
     )
 
     if matched_id and matched_id != dispute_id:
-        logger.info("Correlated to existing active dispute: %s. Cancelling this workflow.", matched_id)
+        logger.info(
+            "Correlated to existing active dispute: %s. Cancelling this workflow.",
+            matched_id,
+        )
         # Update current dispute to duplicate/cancelled
         dispute = await dispute_repo.get_by_id(dispute_id)
         if dispute:
             dispute.status = "CANCELLED"
             dispute.resolution_outcome = f"DUPLICATE_OF_{matched_id}"
             await dispute_repo.update_dispute(dispute)
-            
+
             # Log cancel event
             await audit_service.log_event(
                 dispute_id=dispute_id,
                 action="STATUS_CHANGED",
-                metadata={"old_status": "OPEN", "new_status": "CANCELLED", "reason": "CORRELATED_DUPLICATE"},
+                metadata={
+                    "old_status": "OPEN",
+                    "new_status": "CANCELLED",
+                    "reason": "CORRELATED_DUPLICATE",
+                },
             )
 
         return {
@@ -346,10 +380,15 @@ async def correlation_node(state: DisputeWorkflowState, config: RunnableConfig) 
     }
 
 
-async def assignment_node(state: DisputeWorkflowState, config: RunnableConfig) -> Dict[str, Any]:
+async def assignment_node(
+    state: DisputeWorkflowState, config: RunnableConfig
+) -> dict[str, Any]:
     """Ensures dispute is assigned to an associate and manager."""
     logger.info("[Node Start] assignment_node")
-    if not state.get("dispute_id") or state.get("workflow_status") == "CANCELLED_DUPLICATE":
+    if (
+        not state.get("dispute_id")
+        or state.get("workflow_status") == "CANCELLED_DUPLICATE"
+    ):
         logger.info("[Node End] assignment_node - Bypassed")
         return {}
 
@@ -357,16 +396,17 @@ async def assignment_node(state: DisputeWorkflowState, config: RunnableConfig) -
     dispute_id = state["dispute_id"]
 
     dispute_repo = DisputeRepository(db)
-    from src.core.services.assignment_service import AssignmentService
     from src.data.repositories.assignment_repository import AssignmentRepository
-    from src.data.repositories.user_repository import UserRepository
     from src.data.repositories.other_repositories import ActivityRepository
+    from src.data.repositories.user_repository import UserRepository
 
     activity_repo = ActivityRepository(db)
     audit_service = AuditService(activity_repo)
     assign_repo = AssignmentRepository(db)
     u_repo = UserRepository(db)
-    assignment_service = AssignmentService(dispute_repo, assign_repo, u_repo, audit_service)
+    assignment_service = AssignmentService(
+        dispute_repo, assign_repo, u_repo, audit_service
+    )
 
     dispute = await dispute_repo.get_by_id(dispute_id)
     if dispute and not dispute.assigned_to:
@@ -380,10 +420,15 @@ async def assignment_node(state: DisputeWorkflowState, config: RunnableConfig) -
     }
 
 
-async def validation_node(state: DisputeWorkflowState, config: RunnableConfig) -> Dict[str, Any]:
+async def validation_node(
+    state: DisputeWorkflowState, config: RunnableConfig
+) -> dict[str, Any]:
     """Validates if invoice exists and is not cancelled."""
     logger.info("[Node Start] validation_node")
-    if not state.get("dispute_id") or state.get("workflow_status") == "CANCELLED_DUPLICATE":
+    if (
+        not state.get("dispute_id")
+        or state.get("workflow_status") == "CANCELLED_DUPLICATE"
+    ):
         logger.info("[Node End] validation_node - Bypassed")
         return {}
 
@@ -399,8 +444,10 @@ async def validation_node(state: DisputeWorkflowState, config: RunnableConfig) -
     is_sqlite = (db.bind.dialect.name == "sqlite") if db.bind else False
     table_name = "invoices" if is_sqlite else "ar.invoices"
     inv_res = await db.execute(
-        text(f"SELECT id, status FROM {table_name} WHERE invoice_number = :num AND is_deleted = false"),
-        {"num": dispute.invoice_number}
+        text(
+            f"SELECT id, status FROM {table_name} WHERE invoice_number = :num AND is_deleted = false"
+        ),
+        {"num": dispute.invoice_number},
     )
     row = inv_res.first()
 
@@ -419,7 +466,9 @@ async def validation_node(state: DisputeWorkflowState, config: RunnableConfig) -
             requires_review = True
             reason = "INVOICE_CANCELLED"
 
-    logger.info("[Node End] validation_node - Requires review: %s (%s)", requires_review, reason)
+    logger.info(
+        "[Node End] validation_node - Requires review: %s (%s)", requires_review, reason
+    )
     return {
         "invoice_id": dispute.invoice_id if row else state.get("invoice_id"),
         "requires_human_review": requires_review,
@@ -428,7 +477,9 @@ async def validation_node(state: DisputeWorkflowState, config: RunnableConfig) -
     }
 
 
-async def review_queue_node(state: DisputeWorkflowState, config: RunnableConfig) -> Dict[str, Any]:
+async def review_queue_node(
+    state: DisputeWorkflowState, config: RunnableConfig
+) -> dict[str, Any]:
     """Puts dispute in the review queue and raises human interrupt."""
     logger.info("[Node Start] review_queue_node")
     if not state.get("dispute_id") or not state.get("requires_human_review"):
@@ -469,10 +520,15 @@ async def review_queue_node(state: DisputeWorkflowState, config: RunnableConfig)
     raise NodeInterrupt(f"Workflow paused at Review Queue: {reason}")
 
 
-async def routing_node(state: DisputeWorkflowState, config: RunnableConfig) -> Dict[str, Any]:
+async def routing_node(
+    state: DisputeWorkflowState, config: RunnableConfig
+) -> dict[str, Any]:
     """Captures evidence snapshots and determines routing paths."""
     logger.info("[Node Start] routing_node")
-    if not state.get("dispute_id") or state.get("workflow_status") == "CANCELLED_DUPLICATE":
+    if (
+        not state.get("dispute_id")
+        or state.get("workflow_status") == "CANCELLED_DUPLICATE"
+    ):
         logger.info("[Node End] routing_node - Bypassed")
         return {}
 
@@ -497,13 +553,13 @@ async def routing_node(state: DisputeWorkflowState, config: RunnableConfig) -> D
     inv_id_param = str(raw_inv_id) if (is_sqlite and raw_inv_id) else raw_inv_id
     inv_res = await db.execute(
         text(f"SELECT * FROM {table_name} WHERE id = :id AND is_deleted = false"),
-        {"id": inv_id_param}
+        {"id": inv_id_param},
     )
     inv_row = inv_res.first()
     invoice_snap = dict(inv_row._mapping) if inv_row else {}
 
     validation_snap = {
-        "validated_at": datetime.now(timezone.utc).isoformat(),
+        "validated_at": datetime.now(UTC).isoformat(),
         "status": "VALID",
         "invoice_number": state.get("invoice_number"),
         "invoice_id": str(state.get("invoice_id")),
@@ -519,10 +575,14 @@ async def routing_node(state: DisputeWorkflowState, config: RunnableConfig) -> D
     )
 
     # 2. Determine Route
-    route = cls_determine_route(dispute.dispute_category if dispute else state.get("dispute_category"))
+    route = cls_determine_route(
+        dispute.dispute_category if dispute else state.get("dispute_category")
+    )
     logger.info("[Node End] routing_node - Route determined: %s", route)
     return {
-        "dispute_category": dispute.dispute_category if dispute else state.get("dispute_category"),
+        "dispute_category": dispute.dispute_category
+        if dispute
+        else state.get("dispute_category"),
         "workflow_status": f"ROUTED_{route}",
         "current_node": "routing_node",
     }
@@ -530,7 +590,10 @@ async def routing_node(state: DisputeWorkflowState, config: RunnableConfig) -> D
 
 # --- PHASE 1C RESOLUTION PATH NODES ---
 
-async def collections_node(state: DisputeWorkflowState, config: RunnableConfig) -> Dict[str, Any]:
+
+async def collections_node(
+    state: DisputeWorkflowState, config: RunnableConfig
+) -> dict[str, Any]:
     """Pauses collections activity for the dispute's invoice."""
     logger.info("[Node Start] collections_node")
     db = config["configurable"]["db"]
@@ -562,7 +625,9 @@ async def collections_node(state: DisputeWorkflowState, config: RunnableConfig) 
     }
 
 
-async def invoice_fetcher_node(state: DisputeWorkflowState, config: RunnableConfig) -> Dict[str, Any]:
+async def invoice_fetcher_node(
+    state: DisputeWorkflowState, config: RunnableConfig
+) -> dict[str, Any]:
     """Fetches full invoice details and stores evidence snapshot."""
     logger.info("[Node Start] invoice_fetcher_node")
     db = config["configurable"]["db"]
@@ -578,7 +643,9 @@ async def invoice_fetcher_node(state: DisputeWorkflowState, config: RunnableConf
 
     formatted_details = {
         "invoice_number": inv_details.get("invoice_number", ""),
-        "customer_name": inv_details.get("customer", {}).get("customer_name", "") if isinstance(inv_details.get("customer"), dict) else inv_details.get("customer_name_original", ""),
+        "customer_name": inv_details.get("customer", {}).get("customer_name", "")
+        if isinstance(inv_details.get("customer"), dict)
+        else inv_details.get("customer_name_original", ""),
         "invoice_date": inv_details.get("invoice_date", ""),
         "due_date": inv_details.get("due_date", ""),
         "subtotal_amount": float(inv_details.get("subtotal_amount", 0)),
@@ -605,7 +672,9 @@ async def invoice_fetcher_node(state: DisputeWorkflowState, config: RunnableConf
     }
 
 
-async def amendment_resolution_node(state: DisputeWorkflowState, config: RunnableConfig) -> Dict[str, Any]:
+async def amendment_resolution_node(
+    state: DisputeWorkflowState, config: RunnableConfig
+) -> dict[str, Any]:
     """Evaluates invoice amendment details using AI agent and saves recommendations."""
     logger.info("[Node Start] amendment_resolution_node")
     db = config["configurable"]["db"]
@@ -616,12 +685,17 @@ async def amendment_resolution_node(state: DisputeWorkflowState, config: Runnabl
     if not dispute:
         return {}
 
-    raw_customer_text = state.get("raw_content") or f"Subject: {state.get('email_subject') or ''}\nBody: {state.get('email_body') or ''}"
-    
+    raw_customer_text = (
+        state.get("raw_content")
+        or f"Subject: {state.get('email_subject') or ''}\nBody: {state.get('email_body') or ''}"
+    )
+
     # Read customer updates from comments
     comment_repo = CommentRepository(db)
     comments = await comment_repo.list_comments_for_dispute(dispute_id)
-    cust_comments = [c.comment for c in comments if c.comment_type == "CUSTOMER_COMMENT"]
+    cust_comments = [
+        c.comment for c in comments if c.comment_type == "CUSTOMER_COMMENT"
+    ]
     if cust_comments:
         raw_customer_text += "\n\nCustomer Comments:\n" + "\n".join(cust_comments)
 
@@ -643,7 +717,9 @@ async def amendment_resolution_node(state: DisputeWorkflowState, config: Runnabl
             input_payload=run_details.get("input_payload"),
             status=run_details.get("status"),
         )
-        agent_run.started_at = datetime.now() - timedelta(seconds=(run_details.get("latency") or 0))
+        agent_run.started_at = datetime.now() - timedelta(
+            seconds=(run_details.get("latency") or 0)
+        )
         agent_run.completed_at = datetime.now()
         agent_run.output_payload = {
             "prompt": run_details.get("prompt"),
@@ -687,16 +763,27 @@ async def amendment_resolution_node(state: DisputeWorkflowState, config: Runnabl
         # Pause SLA
         from src.core.services.sla_service import SLAService
         from src.data.repositories.sla_repository import SLARepository
-        sla_service = SLAService(SLARepository(db), dispute_repo, audit_service, settings)
-        await sla_service.handle_status_change(dispute_id, old_status, "WAITING_CUSTOMER")
+
+        sla_service = SLAService(
+            SLARepository(db), dispute_repo, audit_service, settings
+        )
+        await sla_service.handle_status_change(
+            dispute_id, old_status, "WAITING_CUSTOMER"
+        )
 
         await audit_service.log_event(
             dispute_id=dispute_id,
             action="STATUS_CHANGED",
-            metadata={"old_status": old_status, "new_status": "WAITING_CUSTOMER", "reason": "NEED_MORE_INFO"},
+            metadata={
+                "old_status": old_status,
+                "new_status": "WAITING_CUSTOMER",
+                "reason": "NEED_MORE_INFO",
+            },
         )
 
-        raise NodeInterrupt("Workflow paused: Waiting for customer additional information.")
+        raise NodeInterrupt(
+            "Workflow paused: Waiting for customer additional information."
+        )
 
     elif outcome == "CUSTOMER_CORRECT":
         return {
@@ -715,7 +802,9 @@ async def amendment_resolution_node(state: DisputeWorkflowState, config: Runnabl
         }
 
 
-async def reference_extraction_node(state: DisputeWorkflowState, config: RunnableConfig) -> Dict[str, Any]:
+async def reference_extraction_node(
+    state: DisputeWorkflowState, config: RunnableConfig
+) -> dict[str, Any]:
     """Extracts payment UTR reference from customer context."""
     logger.info("[Node Start] reference_extraction_node")
     db = config["configurable"]["db"]
@@ -726,16 +815,23 @@ async def reference_extraction_node(state: DisputeWorkflowState, config: Runnabl
     if not dispute:
         return {}
 
-    raw_customer_text = state.get("raw_content") or f"Subject: {state.get('email_subject') or ''}\nBody: {state.get('email_body') or ''}"
-    
+    raw_customer_text = (
+        state.get("raw_content")
+        or f"Subject: {state.get('email_subject') or ''}\nBody: {state.get('email_body') or ''}"
+    )
+
     # Read customer updates from comments
     comment_repo = CommentRepository(db)
     comments = await comment_repo.list_comments_for_dispute(dispute_id)
-    cust_comments = [c.comment for c in comments if c.comment_type == "CUSTOMER_COMMENT"]
+    cust_comments = [
+        c.comment for c in comments if c.comment_type == "CUSTOMER_COMMENT"
+    ]
     if cust_comments:
         raw_customer_text += "\n\nCustomer Comments:\n" + "\n".join(cust_comments)
 
-    agent_res = await PaymentReferenceExtractionAgent.extract_reference(raw_customer_text)
+    agent_res = await PaymentReferenceExtractionAgent.extract_reference(
+        raw_customer_text
+    )
 
     # Agent Run Tracking
     run_details = agent_res.get("agent_run_details")
@@ -747,7 +843,9 @@ async def reference_extraction_node(state: DisputeWorkflowState, config: Runnabl
             input_payload=run_details.get("input_payload"),
             status=run_details.get("status"),
         )
-        agent_run.started_at = datetime.now() - timedelta(seconds=(run_details.get("latency") or 0))
+        agent_run.started_at = datetime.now() - timedelta(
+            seconds=(run_details.get("latency") or 0)
+        )
         agent_run.completed_at = datetime.now()
         agent_run.output_payload = {
             "prompt": run_details.get("prompt"),
@@ -770,7 +868,9 @@ async def reference_extraction_node(state: DisputeWorkflowState, config: Runnabl
     }
 
 
-async def payment_checker_node(state: DisputeWorkflowState, config: RunnableConfig) -> Dict[str, Any]:
+async def payment_checker_node(
+    state: DisputeWorkflowState, config: RunnableConfig
+) -> dict[str, Any]:
     """Performs deterministic checks on invoice payment and payment reference records."""
     logger.info("[Node Start] payment_checker_node")
     db = config["configurable"]["db"]
@@ -788,15 +888,21 @@ async def payment_checker_node(state: DisputeWorkflowState, config: RunnableConf
     # Resumption check: If payment checker is executed, check if customer has comments containing UTR
     # and if the state doesn't have it, extract reference dynamically
     ref_num = state.get("metadata", {}).get("extracted_reference_number")
-    
+
     comments = await comment_repo.list_comments_for_dispute(dispute_id)
-    cust_comments = [c.comment for c in comments if c.comment_type == "CUSTOMER_COMMENT"]
+    cust_comments = [
+        c.comment for c in comments if c.comment_type == "CUSTOMER_COMMENT"
+    ]
     if not ref_num and cust_comments:
-        logger.info("Found customer comments on checker node. Executing reference extractor dynamically.")
+        logger.info(
+            "Found customer comments on checker node. Executing reference extractor dynamically."
+        )
         raw_customer_text = "\n".join(cust_comments)
-        agent_res = await PaymentReferenceExtractionAgent.extract_reference(raw_customer_text)
+        agent_res = await PaymentReferenceExtractionAgent.extract_reference(
+            raw_customer_text
+        )
         ref_num = agent_res.get("reference_number")
-        
+
         # Save run details
         run_details = agent_res.get("agent_run_details")
         if run_details:
@@ -807,7 +913,9 @@ async def payment_checker_node(state: DisputeWorkflowState, config: RunnableConf
                 input_payload=run_details.get("input_payload"),
                 status=run_details.get("status"),
             )
-            agent_run.started_at = datetime.now() - timedelta(seconds=(run_details.get("latency") or 0))
+            agent_run.started_at = datetime.now() - timedelta(
+                seconds=(run_details.get("latency") or 0)
+            )
             agent_run.completed_at = datetime.now()
             agent_run.output_payload = {
                 "prompt": run_details.get("prompt"),
@@ -817,7 +925,7 @@ async def payment_checker_node(state: DisputeWorkflowState, config: RunnableConf
                 "provider": run_details.get("provider"),
             }
             await agent_run_repo.update_agent_run(agent_run)
-            
+
         if ref_num:
             metadata = dict(state.get("metadata") or {})
             metadata["extracted_reference_number"] = ref_num
@@ -836,7 +944,11 @@ async def payment_checker_node(state: DisputeWorkflowState, config: RunnableConf
             await audit_service.log_event(
                 dispute_id=dispute_id,
                 action="STATUS_CHANGED",
-                metadata={"old_status": dispute.status, "new_status": "RESOLVED", "outcome": "CUSTOMER_CORRECT"},
+                metadata={
+                    "old_status": dispute.status,
+                    "new_status": "RESOLVED",
+                    "outcome": "CUSTOMER_CORRECT",
+                },
             )
             return {
                 "resolution_outcome": "CUSTOMER_CORRECT",
@@ -864,16 +976,27 @@ async def payment_checker_node(state: DisputeWorkflowState, config: RunnableConf
         # Pause SLA
         from src.core.services.sla_service import SLAService
         from src.data.repositories.sla_repository import SLARepository
-        sla_service = SLAService(SLARepository(db), dispute_repo, audit_service, settings)
-        await sla_service.handle_status_change(dispute_id, old_status, "WAITING_CUSTOMER")
+
+        sla_service = SLAService(
+            SLARepository(db), dispute_repo, audit_service, settings
+        )
+        await sla_service.handle_status_change(
+            dispute_id, old_status, "WAITING_CUSTOMER"
+        )
 
         await audit_service.log_event(
             dispute_id=dispute_id,
             action="STATUS_CHANGED",
-            metadata={"old_status": old_status, "new_status": "WAITING_CUSTOMER", "reason": "NEED_MORE_INFO"},
+            metadata={
+                "old_status": old_status,
+                "new_status": "WAITING_CUSTOMER",
+                "reason": "NEED_MORE_INFO",
+            },
         )
 
-        raise NodeInterrupt("Workflow paused: Waiting for customer payment reference (UTR).")
+        raise NodeInterrupt(
+            "Workflow paused: Waiting for customer payment reference (UTR)."
+        )
 
     # REFERENCE EXISTS: Search payments
     res_status = await ar_client.find_payment_reference(ref_num)
@@ -885,7 +1008,11 @@ async def payment_checker_node(state: DisputeWorkflowState, config: RunnableConf
         await audit_service.log_event(
             dispute_id=dispute_id,
             action="STATUS_CHANGED",
-            metadata={"old_status": dispute.status, "new_status": "RESOLVED", "outcome": "CUSTOMER_CORRECT"},
+            metadata={
+                "old_status": dispute.status,
+                "new_status": "RESOLVED",
+                "outcome": "CUSTOMER_CORRECT",
+            },
         )
         return {
             "resolution_outcome": "CUSTOMER_CORRECT",
@@ -900,7 +1027,11 @@ async def payment_checker_node(state: DisputeWorkflowState, config: RunnableConf
         await audit_service.log_event(
             dispute_id=dispute_id,
             action="STATUS_CHANGED",
-            metadata={"old_status": dispute.status, "new_status": "RESOLVED", "outcome": "COMPANY_CORRECT"},
+            metadata={
+                "old_status": dispute.status,
+                "new_status": "RESOLVED",
+                "outcome": "COMPANY_CORRECT",
+            },
         )
         return {
             "resolution_outcome": "COMPANY_CORRECT",
@@ -916,7 +1047,9 @@ async def payment_checker_node(state: DisputeWorkflowState, config: RunnableConf
         }
 
 
-async def department_contact_node(state: DisputeWorkflowState, config: RunnableConfig) -> Dict[str, Any]:
+async def department_contact_node(
+    state: DisputeWorkflowState, config: RunnableConfig
+) -> dict[str, Any]:
     """Notifies relevant department and sets waiting internal team status."""
     logger.info("[Node Start] department_contact_node")
     db = config["configurable"]["db"]
@@ -960,7 +1093,9 @@ async def department_contact_node(state: DisputeWorkflowState, config: RunnableC
     }
 
 
-async def mail_agent_node(state: DisputeWorkflowState, config: RunnableConfig) -> Dict[str, Any]:
+async def mail_agent_node(
+    state: DisputeWorkflowState, config: RunnableConfig
+) -> dict[str, Any]:
     """Runs DisputeMailAgent to compose customer correspondence."""
     logger.info("[Node Start] mail_agent_node")
     db = config["configurable"]["db"]
@@ -977,7 +1112,9 @@ async def mail_agent_node(state: DisputeWorkflowState, config: RunnableConfig) -
 
     # Fetch context logs
     activities = await activity_repo.list_activities_for_dispute(dispute_id)
-    act_summary = "\n".join([f"- {a.activity_type}: {a.activity_metadata}" for a in activities])
+    act_summary = "\n".join(
+        [f"- {a.activity_type}: {a.activity_metadata}" for a in activities]
+    )
 
     comments = await comments_repo.list_comments_for_dispute(dispute_id)
     comm_summary = "\n".join([f"- {c.comment_type}: {c.comment}" for c in comments])
@@ -1005,7 +1142,9 @@ async def mail_agent_node(state: DisputeWorkflowState, config: RunnableConfig) -
             input_payload=run_details.get("input_payload"),
             status=run_details.get("status"),
         )
-        agent_run.started_at = datetime.now() - timedelta(seconds=(run_details.get("latency") or 0))
+        agent_run.started_at = datetime.now() - timedelta(
+            seconds=(run_details.get("latency") or 0)
+        )
         agent_run.completed_at = datetime.now()
         agent_run.output_payload = {
             "prompt": run_details.get("prompt"),
@@ -1031,7 +1170,9 @@ async def mail_agent_node(state: DisputeWorkflowState, config: RunnableConfig) -
     }
 
 
-async def close_dispute_node(state: DisputeWorkflowState, config: RunnableConfig) -> Dict[str, Any]:
+async def close_dispute_node(
+    state: DisputeWorkflowState, config: RunnableConfig
+) -> dict[str, Any]:
     """Updates the dispute database record to CLOSED state and resumes AR collections."""
     logger.info("[Node Start] close_dispute_node")
     db = config["configurable"]["db"]
@@ -1057,8 +1198,8 @@ async def close_dispute_node(state: DisputeWorkflowState, config: RunnableConfig
     dispute.resolution_outcome = canonical_outcome
     old_status = dispute.status
     dispute.status = "CLOSED"
-    
-    now = datetime.now(timezone.utc)
+
+    now = datetime.now(UTC)
     dispute.resolved_at = now
     dispute.closed_at = now
     await dispute_repo.update_dispute(dispute)
@@ -1075,7 +1216,11 @@ async def close_dispute_node(state: DisputeWorkflowState, config: RunnableConfig
     await audit_service.log_event(
         dispute_id=dispute_id,
         action="STATUS_CHANGED",
-        metadata={"old_status": old_status, "new_status": "CLOSED", "outcome": canonical_outcome},
+        metadata={
+            "old_status": old_status,
+            "new_status": "CLOSED",
+            "outcome": canonical_outcome,
+        },
     )
     await audit_service.log_event(
         dispute_id=dispute_id,
@@ -1092,7 +1237,10 @@ async def close_dispute_node(state: DisputeWorkflowState, config: RunnableConfig
 
 # --- WAITING NODES ---
 
-async def waiting_approval_node(state: DisputeWorkflowState, config: RunnableConfig) -> Dict[str, Any]:
+
+async def waiting_approval_node(
+    state: DisputeWorkflowState, config: RunnableConfig
+) -> dict[str, Any]:
     """Pauses workflow in WAITING_ASSOCIATE_APPROVAL status or handles resumption."""
     logger.info("[Node Start] waiting_approval_node")
     db = config["configurable"]["db"]
@@ -1100,27 +1248,33 @@ async def waiting_approval_node(state: DisputeWorkflowState, config: RunnableCon
 
     # Check if we are resuming from an interrupt
     outcome = state.get("resolution_outcome")
-    
+
     dispute_repo = DisputeRepository(db)
     dispute = await dispute_repo.get_by_id(dispute_id)
     if not dispute:
         return {}
-        
+
     activity_repo = ActivityRepository(db)
     audit_service = AuditService(activity_repo)
 
     if outcome in ["APPROVE", "REJECT"]:
-        final_outcome = "CUSTOMER_CORRECT" if outcome == "APPROVE" else "COMPANY_CORRECT"
-        
+        final_outcome = (
+            "CUSTOMER_CORRECT" if outcome == "APPROVE" else "COMPANY_CORRECT"
+        )
+
         old_status = dispute.status
         dispute.status = "RESOLVED"
         dispute.resolution_outcome = final_outcome
         await dispute_repo.update_dispute(dispute)
-        
+
         await audit_service.log_event(
             dispute_id=dispute_id,
             action="STATUS_CHANGED",
-            metadata={"old_status": old_status, "new_status": "RESOLVED", "outcome": final_outcome},
+            metadata={
+                "old_status": old_status,
+                "new_status": "RESOLVED",
+                "outcome": final_outcome,
+            },
         )
         return {
             "resolution_outcome": final_outcome,
@@ -1144,7 +1298,9 @@ async def waiting_approval_node(state: DisputeWorkflowState, config: RunnableCon
     raise NodeInterrupt("Workflow paused: Waiting for Associate Approval decision.")
 
 
-async def waiting_resolution_node(state: DisputeWorkflowState, config: RunnableConfig) -> Dict[str, Any]:
+async def waiting_resolution_node(
+    state: DisputeWorkflowState, config: RunnableConfig
+) -> dict[str, Any]:
     """Pauses workflow in WAITING_PAYMENT_REVIEW or WAITING_INTERNAL_TEAM status or handles resumption."""
     logger.info("[Node Start] waiting_resolution_node")
     db = config["configurable"]["db"]
@@ -1152,27 +1308,40 @@ async def waiting_resolution_node(state: DisputeWorkflowState, config: RunnableC
     category = state.get("dispute_category")
 
     outcome = state.get("resolution_outcome")
-    
+
     dispute_repo = DisputeRepository(db)
     dispute = await dispute_repo.get_by_id(dispute_id)
     if not dispute:
         return {}
-        
+
     activity_repo = ActivityRepository(db)
     audit_service = AuditService(activity_repo)
 
-    if outcome in ["SETTLEMENT_DONE", "SETTLEMENT_NOT_DONE", "ACKNOWLEDGED", "REJECTED"]:
-        final_outcome = "CUSTOMER_CORRECT" if outcome in ["SETTLEMENT_DONE", "ACKNOWLEDGED"] else "COMPANY_CORRECT"
-        
+    if outcome in [
+        "SETTLEMENT_DONE",
+        "SETTLEMENT_NOT_DONE",
+        "ACKNOWLEDGED",
+        "REJECTED",
+    ]:
+        final_outcome = (
+            "CUSTOMER_CORRECT"
+            if outcome in ["SETTLEMENT_DONE", "ACKNOWLEDGED"]
+            else "COMPANY_CORRECT"
+        )
+
         old_status = dispute.status
         dispute.status = "RESOLVED"
         dispute.resolution_outcome = final_outcome
         await dispute_repo.update_dispute(dispute)
-        
+
         await audit_service.log_event(
             dispute_id=dispute_id,
             action="STATUS_CHANGED",
-            metadata={"old_status": old_status, "new_status": "RESOLVED", "outcome": final_outcome},
+            metadata={
+                "old_status": old_status,
+                "new_status": "RESOLVED",
+                "outcome": final_outcome,
+            },
         )
         return {
             "resolution_outcome": final_outcome,
@@ -1202,7 +1371,8 @@ async def waiting_resolution_node(state: DisputeWorkflowState, config: RunnableC
 
 
 # --- ROUTERS ---
- 
+
+
 def route_after_intake(state: DisputeWorkflowState) -> str:
     """Routes after case intake node."""
     if state.get("metadata", {}).get("is_idempotent_bypass"):
@@ -1261,17 +1431,26 @@ def route_after_department_contact(state: DisputeWorkflowState) -> str:
     return "waiting_resolution_node"
 
 
-def cls_determine_route(category: Optional[str]) -> str:
+def cls_determine_route(category: str | None) -> str:
     """Determines route category."""
     if not category:
         return "OTHER"
     cat = category.upper().strip()
-    if cat in ["AMENDMENT", "PAYMENT_ALREADY_DONE", "PAYMENT_NOT_REFLECTED", "DUPLICATE_INVOICE", "QUALITY", "LATE_DELIVERY", "OTHER"]:
+    if cat in [
+        "AMENDMENT",
+        "PAYMENT_ALREADY_DONE",
+        "PAYMENT_NOT_REFLECTED",
+        "DUPLICATE_INVOICE",
+        "QUALITY",
+        "LATE_DELIVERY",
+        "OTHER",
+    ]:
         return cat
     return "OTHER"
 
 
 # --- BUILD STATE GRAPH ---
+
 
 def create_graph() -> StateGraph:
     """Builds the unified dispute lifecycle workflow graph."""
@@ -1307,7 +1486,7 @@ def create_graph() -> StateGraph:
         {
             "triage_agent_node": "triage_agent_node",
             END: END,
-        }
+        },
     )
     workflow.add_conditional_edges(
         "triage_agent_node",
@@ -1315,25 +1494,25 @@ def create_graph() -> StateGraph:
         {
             "dispute_generation_node": "dispute_generation_node",
             "correlation_node": "correlation_node",
-        }
+        },
     )
     workflow.add_edge("dispute_generation_node", END)
 
     workflow.add_edge("correlation_node", "assignment_node")
     workflow.add_edge("assignment_node", "validation_node")
-    
+
     workflow.add_conditional_edges(
         "validation_node",
         route_after_validation,
         {
             "review_queue_node": "review_queue_node",
             "routing_node": "routing_node",
-        }
+        },
     )
-    
+
     # After review resolution, return back to Validation Node
     workflow.add_edge("review_queue_node", "validation_node")
-    
+
     workflow.add_edge("routing_node", "collections_node")
 
     workflow.add_conditional_edges(
@@ -1343,7 +1522,7 @@ def create_graph() -> StateGraph:
             "invoice_fetcher_node": "invoice_fetcher_node",
             "reference_extraction_node": "reference_extraction_node",
             "department_contact_node": "department_contact_node",
-        }
+        },
     )
 
     # Amendment Path
@@ -1355,7 +1534,7 @@ def create_graph() -> StateGraph:
             "waiting_approval_node": "waiting_approval_node",
             "mail_agent_node": "mail_agent_node",
             END: END,
-        }
+        },
     )
     workflow.add_edge("waiting_approval_node", "mail_agent_node")
 
@@ -1368,7 +1547,7 @@ def create_graph() -> StateGraph:
             "mail_agent_node": "mail_agent_node",
             "waiting_resolution_node": "waiting_resolution_node",
             END: END,
-        }
+        },
     )
 
     # Operational Path
@@ -1377,7 +1556,7 @@ def create_graph() -> StateGraph:
         route_after_department_contact,
         {
             "waiting_resolution_node": "waiting_resolution_node",
-        }
+        },
     )
 
     # Resumed waits move to Mail

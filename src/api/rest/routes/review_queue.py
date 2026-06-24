@@ -1,19 +1,23 @@
-from uuid import UUID, uuid4
 import logging
-from fastapi import APIRouter, Depends, Query, HTTPException
-from pydantic import BaseModel
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import text
+from uuid import UUID, uuid4
 
-from src.api.dependencies import get_review_queue_repository, get_dispute_repository, get_resume_service
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from src.api.dependencies import (
+    get_dispute_repository,
+    get_resume_service,
+    get_review_queue_repository,
+)
 from src.core.security.dependencies import require_finance
-from src.data.clients.postgres_client import get_async_db
-from src.data.repositories.review_queue_repository import ReviewQueueRepository
-from src.data.repositories.dispute_repository import DisputeRepository
 from src.core.workflow.resume_service import DisputeResumeService
+from src.data.clients.postgres_client import get_async_db
+from src.data.repositories.dispute_repository import DisputeRepository
+from src.data.repositories.review_queue_repository import ReviewQueueRepository
 from src.schemas.auth import TokenPayload
 from src.schemas.dispute import ReviewQueueResponse
-
 
 router = APIRouter(prefix="/review-queue", tags=["Review Queue"])
 
@@ -33,7 +37,9 @@ async def list_review_queue(
     review_repo: ReviewQueueRepository = Depends(get_review_queue_repository),
 ):
     """Retrieves the current dispute review queue items."""
-    items = await review_repo.list_review_queue(status=status, limit=limit, offset=offset)
+    items = await review_repo.list_review_queue(
+        status=status, limit=limit, offset=offset
+    )
     return [ReviewQueueResponse.model_validate(i) for i in items]
 
 
@@ -62,6 +68,7 @@ async def resolve_review_queue_item(
 
     # 2. Update dispute fields
     from src.core.workflow.triage_agent import DisputeTriageAgent
+
     norm_cat = DisputeTriageAgent.normalize_category(payload.dispute_category)
 
     dispute.invoice_number = payload.invoice_number
@@ -72,8 +79,10 @@ async def resolve_review_queue_item(
     is_sqlite = (db.bind.dialect.name == "sqlite") if db.bind else False
     table_name = "invoices" if is_sqlite else "ar.invoices"
     inv_res = await db.execute(
-        text(f"SELECT id, customer_id FROM {table_name} WHERE invoice_number = :num AND is_deleted = false"),
-        {"num": payload.invoice_number}
+        text(
+            f"SELECT id, customer_id FROM {table_name} WHERE invoice_number = :num AND is_deleted = false"
+        ),
+        {"num": payload.invoice_number},
     )
     row = inv_res.first()
     if row:
@@ -84,15 +93,29 @@ async def resolve_review_queue_item(
 
     # 3. Create comment & activity log
     await db.execute(
-        text("INSERT INTO dispute_comments (id, dispute_id, comment, comment_type, created_by, created_at) "
-             "VALUES (:c_id, :d_id, :comment, 'INTERNAL', :user_id, NOW())"),
-        {"c_id": uuid4(), "d_id": dispute.id, "comment": f"Resolved from review queue: {payload.comments or ''}", "user_id": current_user.sub}
+        text(
+            "INSERT INTO dispute_comments (id, dispute_id, comment, comment_type, created_by, created_at) "
+            "VALUES (:c_id, :d_id, :comment, 'INTERNAL', :user_id, NOW())"
+        ),
+        {
+            "c_id": uuid4(),
+            "d_id": dispute.id,
+            "comment": f"Resolved from review queue: {payload.comments or ''}",
+            "user_id": current_user.sub,
+        },
     )
 
     await db.execute(
-        text("INSERT INTO dispute_activities (id, dispute_id, activity_type, activity_metadata, performed_by, created_at) "
-             "VALUES (:act_id, :d_id, 'REVIEW_QUEUE_RESOLVED', :meta, :user_id, NOW())"),
-        {"act_id": uuid4(), "d_id": dispute.id, "meta": f'{{"invoice_number": "{payload.invoice_number}", "dispute_category": "{norm_cat}"}}', "user_id": current_user.sub}
+        text(
+            "INSERT INTO dispute_activities (id, dispute_id, activity_type, activity_metadata, performed_by, created_at) "
+            "VALUES (:act_id, :d_id, 'REVIEW_QUEUE_RESOLVED', :meta, :user_id, NOW())"
+        ),
+        {
+            "act_id": uuid4(),
+            "d_id": dispute.id,
+            "meta": f'{{"invoice_number": "{payload.invoice_number}", "dispute_category": "{norm_cat}"}}',
+            "user_id": current_user.sub,
+        },
     )
 
     await db.commit()

@@ -1,8 +1,8 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import UUID
 
 from src.core.config.settings import Settings
-from src.core.exceptions.business_exceptions import SLAException, ValidationException
+from src.core.exceptions.business_exceptions import ValidationException
 from src.core.services.audit_service import AuditService
 from src.data.models.postgres.sla import DisputeSLA
 from src.data.repositories.dispute_repository import DisputeRepository
@@ -47,7 +47,7 @@ class SLAService:
             return existing_sla
 
         sla_minutes = self._get_sla_minutes_for_category(dispute.dispute_category)
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         sla = await self.sla_repo.create_sla(
             dispute_id=dispute_id,
@@ -66,13 +66,15 @@ class SLAService:
 
         return sla
 
-    async def handle_status_change(self, dispute_id: UUID, old_status: str, new_status: str) -> None:
+    async def handle_status_change(
+        self, dispute_id: UUID, old_status: str, new_status: str
+    ) -> None:
         """Triggers SLA Pause / Resume based on status transition rules."""
         sla = await self.sla_repo.get_by_dispute_id(dispute_id)
         if not sla:
             return
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         # Transitioning TO WAITING_CUSTOMER: Pause SLA
         if new_status == "WAITING_CUSTOMER" and not sla.is_paused:
@@ -87,8 +89,12 @@ class SLAService:
             )
 
         # Transitioning AWAY from WAITING_CUSTOMER: Resume SLA
-        elif old_status == "WAITING_CUSTOMER" and new_status != "WAITING_CUSTOMER" and sla.is_paused:
-            paused_at = (sla.paused_at or sla.started_at).replace(tzinfo=timezone.utc)
+        elif (
+            old_status == "WAITING_CUSTOMER"
+            and new_status != "WAITING_CUSTOMER"
+            and sla.is_paused
+        ):
+            paused_at = (sla.paused_at or sla.started_at).replace(tzinfo=UTC)
             paused_duration_minutes = (now - paused_at).total_seconds() / 60.0
             sla.accumulated_paused_minutes += paused_duration_minutes
             sla.is_paused = False
@@ -113,11 +119,11 @@ class SLAService:
         if not sla:
             raise ValidationException("SLA not found for dispute.")
 
-        now = datetime.now(timezone.utc)
-        started_at = sla.started_at.replace(tzinfo=timezone.utc)
+        now = datetime.now(UTC)
+        started_at = sla.started_at.replace(tzinfo=UTC)
 
         if sla.is_paused:
-            paused_at = (sla.paused_at or now).replace(tzinfo=timezone.utc)
+            paused_at = (sla.paused_at or now).replace(tzinfo=UTC)
             elapsed_total_minutes = (paused_at - started_at).total_seconds() / 60.0
         else:
             elapsed_total_minutes = (now - started_at).total_seconds() / 60.0

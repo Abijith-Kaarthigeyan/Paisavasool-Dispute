@@ -20,7 +20,9 @@ class CommunicationRepository:
         )
         return result.scalar_one_or_none()
 
-    async def get_communications_for_dispute(self, dispute_id: UUID) -> list[DisputeCommunication]:
+    async def get_communications_for_dispute(
+        self, dispute_id: UUID
+    ) -> list[DisputeCommunication]:
         result = await self.db.execute(
             select(DisputeCommunication)
             .where(

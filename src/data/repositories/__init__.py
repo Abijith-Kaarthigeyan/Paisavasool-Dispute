@@ -5,9 +5,9 @@ from src.data.repositories.dispute_repository import DisputeRepository
 from src.data.repositories.escalation_repository import EscalationRepository
 from src.data.repositories.other_repositories import (
     ActivityRepository,
+    AgentRunRepository,
     AttachmentRepository,
     CommentRepository,
-    AgentRunRepository,
     EvidenceSnapshotRepository,
 )
 from src.data.repositories.recommendation_repository import RecommendationRepository

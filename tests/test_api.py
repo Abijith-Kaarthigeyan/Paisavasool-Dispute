@@ -1,15 +1,15 @@
-import pytest
-from datetime import datetime
 from uuid import UUID, uuid4
+
+import pytest
 from httpx import AsyncClient
 
 from main import app
 from src.core.security.dependencies import get_current_user
 from src.data.repositories import (
-    CaseRepository,
-    DisputeRepository,
-    CommentRepository,
     ActivityRepository,
+    CaseRepository,
+    CommentRepository,
+    DisputeRepository,
     RecommendationRepository,
     ReviewQueueRepository,
     WorkflowContextRepository,
@@ -108,7 +108,9 @@ async def test_get_cases_endpoint(mock_client: AsyncClient, seed_api_data):
     # Override current user to manager
     app.dependency_overrides[get_current_user] = lambda: MOCK_MANAGER
 
-    resp = await mock_client.get("/api/v1/cases", headers={"Authorization": "Bearer dummy"})
+    resp = await mock_client.get(
+        "/api/v1/cases", headers={"Authorization": "Bearer dummy"}
+    )
     assert resp.status_code == 200
     data = resp.json()
     assert len(data) >= 1
@@ -120,7 +122,9 @@ async def test_get_case_by_id_endpoint(mock_client: AsyncClient, seed_api_data):
     app.dependency_overrides[get_current_user] = lambda: MOCK_MANAGER
     case_id = seed_api_data["case"].id
 
-    resp = await mock_client.get(f"/api/v1/cases/{case_id}", headers={"Authorization": "Bearer dummy"})
+    resp = await mock_client.get(
+        f"/api/v1/cases/{case_id}", headers={"Authorization": "Bearer dummy"}
+    )
     assert resp.status_code == 200
     assert resp.json()["id"] == str(case_id)
 
@@ -129,7 +133,9 @@ async def test_get_case_by_id_endpoint(mock_client: AsyncClient, seed_api_data):
 async def test_get_disputes_endpoint(mock_client: AsyncClient, seed_api_data):
     app.dependency_overrides[get_current_user] = lambda: MOCK_ASSOCIATE
 
-    resp = await mock_client.get("/api/v1/disputes", headers={"Authorization": "Bearer dummy"})
+    resp = await mock_client.get(
+        "/api/v1/disputes", headers={"Authorization": "Bearer dummy"}
+    )
     assert resp.status_code == 200
     data = resp.json()
     assert len(data) >= 1
@@ -141,7 +147,9 @@ async def test_get_dispute_by_id_endpoint(mock_client: AsyncClient, seed_api_dat
     app.dependency_overrides[get_current_user] = lambda: MOCK_ASSOCIATE
     dispute_id = seed_api_data["dispute"].id
 
-    resp = await mock_client.get(f"/api/v1/disputes/{dispute_id}", headers={"Authorization": "Bearer dummy"})
+    resp = await mock_client.get(
+        f"/api/v1/disputes/{dispute_id}", headers={"Authorization": "Bearer dummy"}
+    )
     assert resp.status_code == 200
     assert resp.json()["id"] == str(dispute_id)
 
@@ -151,7 +159,10 @@ async def test_get_dispute_activities_endpoint(mock_client: AsyncClient, seed_ap
     app.dependency_overrides[get_current_user] = lambda: MOCK_ASSOCIATE
     dispute_id = seed_api_data["dispute"].id
 
-    resp = await mock_client.get(f"/api/v1/disputes/{dispute_id}/activities", headers={"Authorization": "Bearer dummy"})
+    resp = await mock_client.get(
+        f"/api/v1/disputes/{dispute_id}/activities",
+        headers={"Authorization": "Bearer dummy"},
+    )
     assert resp.status_code == 200
     data = resp.json()
     assert len(data) >= 1
@@ -163,7 +174,10 @@ async def test_get_dispute_comments_endpoint(mock_client: AsyncClient, seed_api_
     app.dependency_overrides[get_current_user] = lambda: MOCK_ASSOCIATE
     dispute_id = seed_api_data["dispute"].id
 
-    resp = await mock_client.get(f"/api/v1/disputes/{dispute_id}/comments", headers={"Authorization": "Bearer dummy"})
+    resp = await mock_client.get(
+        f"/api/v1/disputes/{dispute_id}/comments",
+        headers={"Authorization": "Bearer dummy"},
+    )
     assert resp.status_code == 200
     data = resp.json()
     assert len(data) >= 1
@@ -176,19 +190,29 @@ async def test_create_dispute_comment_endpoint(mock_client: AsyncClient, seed_ap
     dispute_id = seed_api_data["dispute"].id
 
     payload = {"comment": "New API comment", "comment_type": "INTERNAL"}
-    resp = await mock_client.post(f"/api/v1/disputes/{dispute_id}/comments", json=payload, headers={"Authorization": "Bearer dummy"})
+    resp = await mock_client.post(
+        f"/api/v1/disputes/{dispute_id}/comments",
+        json=payload,
+        headers={"Authorization": "Bearer dummy"},
+    )
     assert resp.status_code == 200
     assert resp.json()["comment"] == "New API comment"
 
 
 @pytest.mark.asyncio
-async def test_reassign_dispute_endpoint(mock_client: AsyncClient, seed_api_data, seed_users):
+async def test_reassign_dispute_endpoint(
+    mock_client: AsyncClient, seed_api_data, seed_users
+):
     app.dependency_overrides[get_current_user] = lambda: MOCK_MANAGER
     dispute_id = seed_api_data["dispute"].id
     assoc_id = seed_users["associate"].id
 
     payload = {"assigned_to": str(assoc_id)}
-    resp = await mock_client.post(f"/api/v1/disputes/{dispute_id}/reassign", json=payload, headers={"Authorization": "Bearer dummy"})
+    resp = await mock_client.post(
+        f"/api/v1/disputes/{dispute_id}/reassign",
+        json=payload,
+        headers={"Authorization": "Bearer dummy"},
+    )
     assert resp.status_code == 200
     assert resp.json()["assigned_to"] == str(assoc_id)
 
@@ -198,7 +222,10 @@ async def test_get_recommendations_endpoint(mock_client: AsyncClient, seed_api_d
     app.dependency_overrides[get_current_user] = lambda: MOCK_ASSOCIATE
     dispute_id = seed_api_data["dispute"].id
 
-    resp = await mock_client.get(f"/api/v1/disputes/{dispute_id}/recommendations", headers={"Authorization": "Bearer dummy"})
+    resp = await mock_client.get(
+        f"/api/v1/disputes/{dispute_id}/recommendations",
+        headers={"Authorization": "Bearer dummy"},
+    )
     assert resp.status_code == 200
     data = resp.json()
     assert len(data) >= 1
@@ -209,7 +236,9 @@ async def test_get_recommendations_endpoint(mock_client: AsyncClient, seed_api_d
 async def test_get_review_queue_endpoint(mock_client: AsyncClient, seed_api_data):
     app.dependency_overrides[get_current_user] = lambda: MOCK_MANAGER
 
-    resp = await mock_client.get("/api/v1/review-queue", headers={"Authorization": "Bearer dummy"})
+    resp = await mock_client.get(
+        "/api/v1/review-queue", headers={"Authorization": "Bearer dummy"}
+    )
     assert resp.status_code == 200
     data = resp.json()
     assert len(data) >= 1
@@ -221,7 +250,10 @@ async def test_resume_dispute_endpoint(mock_client: AsyncClient, seed_api_data):
     app.dependency_overrides[get_current_user] = lambda: MOCK_ASSOCIATE
     dispute_id = seed_api_data["dispute"].id
 
-    resp = await mock_client.post(f"/api/v1/disputes/{dispute_id}/resume", headers={"Authorization": "Bearer dummy"})
+    resp = await mock_client.post(
+        f"/api/v1/disputes/{dispute_id}/resume",
+        headers={"Authorization": "Bearer dummy"},
+    )
     assert resp.status_code == 200
     data = resp.json()
     assert data["status"] == "SUCCESS"

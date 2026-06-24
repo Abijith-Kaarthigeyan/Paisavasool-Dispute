@@ -29,12 +29,20 @@ class ReviewQueueRepository:
         )
         return result.scalar_one_or_none()
 
-    async def list_review_queue(self, status: str | None = None, limit: int = 100, offset: int = 0) -> list[DisputeReviewQueue]:
-        query = select(DisputeReviewQueue).where(DisputeReviewQueue.is_deleted.is_(False))
+    async def list_review_queue(
+        self, status: str | None = None, limit: int = 100, offset: int = 0
+    ) -> list[DisputeReviewQueue]:
+        query = select(DisputeReviewQueue).where(
+            DisputeReviewQueue.is_deleted.is_(False)
+        )
         if status:
             query = query.where(DisputeReviewQueue.status == status)
 
-        query = query.order_by(DisputeReviewQueue.created_at.desc()).limit(limit).offset(offset)
+        query = (
+            query.order_by(DisputeReviewQueue.created_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
         result = await self.db.execute(query)
         return list(result.scalars().all())
 
@@ -65,7 +73,9 @@ class ReviewQueueRepository:
             await self.db.flush()
         return item
 
-    async def update_review_queue_item(self, item: DisputeReviewQueue) -> DisputeReviewQueue:
+    async def update_review_queue_item(
+        self, item: DisputeReviewQueue
+    ) -> DisputeReviewQueue:
         item.updated_at = datetime.now()
         if not self.db.sync_session._flushing:
             await self.db.flush()

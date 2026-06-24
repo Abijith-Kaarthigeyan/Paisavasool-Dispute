@@ -7,9 +7,9 @@ from src.api.middleware.auth import auth_middleware
 from src.api.middleware.cors import setup_cors
 from src.api.middleware.logging import logging_middleware
 from src.api.middleware.request_id import request_id_middleware
+from src.api.rest.routes.assignments import router as assignments_router
 from src.api.rest.routes.cases import router as cases_router
 from src.api.rest.routes.disputes import router as disputes_router
-from src.api.rest.routes.assignments import router as assignments_router
 from src.api.rest.routes.recommendations import router as recommendations_router
 from src.api.rest.routes.review_queue import router as review_queue_router
 from src.core.config.settings import settings

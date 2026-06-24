@@ -17,14 +17,13 @@ from src.data.clients.ar_service_client import ARServiceClient
 from src.data.clients.postgres_client import get_async_db
 from src.data.repositories import (
     ActivityRepository,
+    AgentRunRepository,
     AssignmentRepository,
-    AttachmentRepository,
     CaseRepository,
     CommentRepository,
     CommunicationRepository,
     DisputeRepository,
     EscalationRepository,
-    AgentRunRepository,
     EvidenceSnapshotRepository,
     RecommendationRepository,
     ReviewQueueRepository,
@@ -40,11 +39,15 @@ def get_case_repository(db: AsyncSession = Depends(get_async_db)) -> CaseReposit
     return CaseRepository(db)
 
 
-def get_dispute_repository(db: AsyncSession = Depends(get_async_db)) -> DisputeRepository:
+def get_dispute_repository(
+    db: AsyncSession = Depends(get_async_db),
+) -> DisputeRepository:
     return DisputeRepository(db)
 
 
-def get_assignment_repository(db: AsyncSession = Depends(get_async_db)) -> AssignmentRepository:
+def get_assignment_repository(
+    db: AsyncSession = Depends(get_async_db),
+) -> AssignmentRepository:
     return AssignmentRepository(db)
 
 
@@ -52,27 +55,39 @@ def get_sla_repository(db: AsyncSession = Depends(get_async_db)) -> SLARepositor
     return SLARepository(db)
 
 
-def get_escalation_repository(db: AsyncSession = Depends(get_async_db)) -> EscalationRepository:
+def get_escalation_repository(
+    db: AsyncSession = Depends(get_async_db),
+) -> EscalationRepository:
     return EscalationRepository(db)
 
 
-def get_workflow_context_repository(db: AsyncSession = Depends(get_async_db)) -> WorkflowContextRepository:
+def get_workflow_context_repository(
+    db: AsyncSession = Depends(get_async_db),
+) -> WorkflowContextRepository:
     return WorkflowContextRepository(db)
 
 
-def get_recommendation_repository(db: AsyncSession = Depends(get_async_db)) -> RecommendationRepository:
+def get_recommendation_repository(
+    db: AsyncSession = Depends(get_async_db),
+) -> RecommendationRepository:
     return RecommendationRepository(db)
 
 
-def get_review_queue_repository(db: AsyncSession = Depends(get_async_db)) -> ReviewQueueRepository:
+def get_review_queue_repository(
+    db: AsyncSession = Depends(get_async_db),
+) -> ReviewQueueRepository:
     return ReviewQueueRepository(db)
 
 
-def get_comment_repository(db: AsyncSession = Depends(get_async_db)) -> CommentRepository:
+def get_comment_repository(
+    db: AsyncSession = Depends(get_async_db),
+) -> CommentRepository:
     return CommentRepository(db)
 
 
-def get_activity_repository(db: AsyncSession = Depends(get_async_db)) -> ActivityRepository:
+def get_activity_repository(
+    db: AsyncSession = Depends(get_async_db),
+) -> ActivityRepository:
     return ActivityRepository(db)
 
 
@@ -80,7 +95,9 @@ def get_user_repository(db: AsyncSession = Depends(get_async_db)) -> UserReposit
     return UserRepository(db)
 
 
-def get_communication_repository(db: AsyncSession = Depends(get_async_db)) -> CommunicationRepository:
+def get_communication_repository(
+    db: AsyncSession = Depends(get_async_db),
+) -> CommunicationRepository:
     return CommunicationRepository(db)
 
 
@@ -132,7 +149,9 @@ def get_correlation_service(
     comment_repo: CommentRepository = Depends(get_comment_repository),
     audit_service: AuditService = Depends(get_audit_service),
 ) -> CorrelationService:
-    return CorrelationService(dispute_repo, communication_repo, comment_repo, audit_service)
+    return CorrelationService(
+        dispute_repo, communication_repo, comment_repo, audit_service
+    )
 
 
 def get_workflow_context_service(
@@ -155,11 +174,15 @@ def get_validation_service(
     return ValidationService(ar_client)
 
 
-def get_agent_run_repository(db: AsyncSession = Depends(get_async_db)) -> AgentRunRepository:
+def get_agent_run_repository(
+    db: AsyncSession = Depends(get_async_db),
+) -> AgentRunRepository:
     return AgentRunRepository(db)
 
 
-def get_evidence_snapshot_repository(db: AsyncSession = Depends(get_async_db)) -> EvidenceSnapshotRepository:
+def get_evidence_snapshot_repository(
+    db: AsyncSession = Depends(get_async_db),
+) -> EvidenceSnapshotRepository:
     return EvidenceSnapshotRepository(db)
 
 
@@ -175,6 +198,8 @@ def get_interrupt_service(
 
 
 def get_evidence_snapshot_service(
-    snapshot_repo: EvidenceSnapshotRepository = Depends(get_evidence_snapshot_repository),
+    snapshot_repo: EvidenceSnapshotRepository = Depends(
+        get_evidence_snapshot_repository
+    ),
 ) -> EvidenceSnapshotService:
     return EvidenceSnapshotService(snapshot_repo)

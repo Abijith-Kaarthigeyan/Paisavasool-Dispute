@@ -20,7 +20,9 @@ class RecommendationRepository:
         )
         return result.scalar_one_or_none()
 
-    async def get_recommendations_for_dispute(self, dispute_id: UUID) -> list[DisputeResolutionRecommendation]:
+    async def get_recommendations_for_dispute(
+        self, dispute_id: UUID
+    ) -> list[DisputeResolutionRecommendation]:
         result = await self.db.execute(
             select(DisputeResolutionRecommendation)
             .where(
@@ -31,7 +33,9 @@ class RecommendationRepository:
         )
         return list(result.scalars().all())
 
-    async def get_latest_recommendation(self, dispute_id: UUID) -> DisputeResolutionRecommendation | None:
+    async def get_latest_recommendation(
+        self, dispute_id: UUID
+    ) -> DisputeResolutionRecommendation | None:
         result = await self.db.execute(
             select(DisputeResolutionRecommendation)
             .where(

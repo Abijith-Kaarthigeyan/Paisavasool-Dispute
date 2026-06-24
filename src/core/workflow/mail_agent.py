@@ -3,7 +3,8 @@
 import json
 import re
 import time
-from typing import Any, Dict
+from typing import Any
+
 import httpx
 
 from src.core.config.settings import settings
@@ -19,13 +20,13 @@ class DisputeMailAgent:
         dispute_category: str,
         outcome: str,
         customer_email: str,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Provides high-quality, structured fallback templates for emails when LLM is unavailable."""
         logger.info("Executing template fallback email generator")
-        
+
         recipient = customer_email
         subject = f"Paisa Vasool Update on your Dispute - {dispute_category}"
-        
+
         if outcome == "CUSTOMER_CORRECT":
             body = (
                 "Dear Customer,\n\n"
@@ -74,12 +75,8 @@ class DisputeMailAgent:
                 "Best regards,\n"
                 "Paisa Vasool Customer Support Team"
             )
-            
-        return {
-            "recipient": recipient,
-            "subject": subject,
-            "body": body
-        }
+
+        return {"recipient": recipient, "subject": subject, "body": body}
 
     @classmethod
     async def generate_mail(
@@ -90,7 +87,7 @@ class DisputeMailAgent:
         activities_summary: str,
         comments_summary: str,
         invoice_summary: str,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Generates customized email subject and body for dispute updates using LLM or fallback.
 
         Returns:
@@ -135,11 +132,17 @@ Expected JSON Schema:
             ("qwen/qwen-2.5-72b-instruct", "OpenRouter"),
         ]
 
-        if openrouter_key and not openrouter_key.startswith("mock-") and openrouter_key.strip():
+        if (
+            openrouter_key
+            and not openrouter_key.startswith("mock-")
+            and openrouter_key.strip()
+        ):
             for model, provider in models_to_try:
                 start_time = time.time()
                 try:
-                    logger.info("Attempting mail generation with %s model: %s", provider, model)
+                    logger.info(
+                        "Attempting mail generation with %s model: %s", provider, model
+                    )
                     headers = {
                         "Authorization": f"Bearer {openrouter_key.strip()}",
                         "Content-Type": "application/json",
@@ -167,11 +170,17 @@ Expected JSON Schema:
                     parsed = cls._clean_and_parse_json(content)
                     return {
                         "recipient": parsed.get("recipient", customer_email),
-                        "subject": parsed.get("subject", f"Update on your dispute - {dispute_category}"),
+                        "subject": parsed.get(
+                            "subject", f"Update on your dispute - {dispute_category}"
+                        ),
                         "body": parsed.get("body", ""),
                         "agent_run_details": {
                             "prompt": prompt,
-                            "input_payload": {"category": dispute_category, "outcome": outcome, "email": customer_email},
+                            "input_payload": {
+                                "category": dispute_category,
+                                "outcome": outcome,
+                                "email": customer_email,
+                            },
                             "output_payload": parsed,
                             "latency": latency,
                             "model": model,
@@ -180,14 +189,18 @@ Expected JSON Schema:
                         },
                     }
                 except Exception as e:
-                    logger.warning("Mail generation failed with model %s: %s", model, str(e))
+                    logger.warning(
+                        "Mail generation failed with model %s: %s", model, str(e)
+                    )
 
         if gemini_key and not gemini_key.startswith("mock-") and gemini_key.strip():
             start_time = time.time()
             model = settings.GEMINI_MODEL_NAME
             provider = "Direct Gemini"
             try:
-                logger.info("Attempting mail generation with direct Gemini model: %s", model)
+                logger.info(
+                    "Attempting mail generation with direct Gemini model: %s", model
+                )
                 url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={gemini_key.strip()}"
                 payload = {
                     "contents": [{"parts": [{"text": prompt}]}],
@@ -200,7 +213,9 @@ Expected JSON Schema:
                     resp = await client.post(url, json=payload, timeout=15.0)
                     resp.raise_for_status()
                     result_json = resp.json()
-                    content = result_json["candidates"][0]["content"]["parts"][0]["text"]
+                    content = result_json["candidates"][0]["content"]["parts"][0][
+                        "text"
+                    ]
 
                 latency = time.time() - start_time
                 logger.info("Direct Gemini mail generation succeeded.")
@@ -208,11 +223,17 @@ Expected JSON Schema:
                 parsed = cls._clean_and_parse_json(content)
                 return {
                     "recipient": parsed.get("recipient", customer_email),
-                    "subject": parsed.get("subject", f"Update on your dispute - {dispute_category}"),
+                    "subject": parsed.get(
+                        "subject", f"Update on your dispute - {dispute_category}"
+                    ),
                     "body": parsed.get("body", ""),
                     "agent_run_details": {
                         "prompt": prompt,
-                        "input_payload": {"category": dispute_category, "outcome": outcome, "email": customer_email},
+                        "input_payload": {
+                            "category": dispute_category,
+                            "outcome": outcome,
+                            "email": customer_email,
+                        },
                         "output_payload": parsed,
                         "latency": latency,
                         "model": model,
@@ -234,7 +255,11 @@ Expected JSON Schema:
             "body": fallback_res["body"],
             "agent_run_details": {
                 "prompt": prompt,
-                "input_payload": {"category": dispute_category, "outcome": outcome, "email": customer_email},
+                "input_payload": {
+                    "category": dispute_category,
+                    "outcome": outcome,
+                    "email": customer_email,
+                },
                 "output_payload": fallback_res,
                 "latency": latency,
                 "model": "template_fallback",
@@ -244,7 +269,7 @@ Expected JSON Schema:
         }
 
     @classmethod
-    def _clean_and_parse_json(cls, content: str) -> Dict[str, Any]:
+    def _clean_and_parse_json(cls, content: str) -> dict[str, Any]:
         """Cleans potential markdown blocks and parses JSON string."""
         cleaned = content.strip()
         if cleaned.startswith("```"):

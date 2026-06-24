@@ -19,7 +19,9 @@ async def assign_dispute(
 ):
     """Automatically assigns a dispute based on associate workload."""
     try:
-        dispute = await assignment_service.assign_dispute(id, performed_by=current_user.sub)
+        dispute = await assignment_service.assign_dispute(
+            id, performed_by=current_user.sub
+        )
         return DisputeResponse.model_validate(dispute)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))

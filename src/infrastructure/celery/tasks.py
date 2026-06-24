@@ -1,8 +1,6 @@
 import asyncio
-import json
 import traceback
 from collections.abc import Coroutine
-from datetime import datetime
 from typing import Any
 from uuid import UUID
 
@@ -18,6 +16,7 @@ async def _wrap_coro(coro: Coroutine[Any, Any, Any]) -> Any:
     finally:
         try:
             from src.data.clients.postgres_client import engine
+
             await engine.dispose()
         except Exception as e:
             logger.error("Failed to dispose database engine in task wrapper: %s", e)
@@ -41,18 +40,17 @@ def _run_async(coro: Coroutine[Any, Any, Any]) -> Any:
         return asyncio.run(wrapped)
 
 
-
 async def run_sla_monitoring_async() -> int:
     """Recalculates SLA progress and checks escalations for all open/active disputes."""
+    from src.core.config.settings import settings
+    from src.core.services.audit_service import AuditService
+    from src.core.services.escalation_service import EscalationService
+    from src.core.services.sla_service import SLAService
     from src.data.clients.postgres_client import AsyncSessionLocal
     from src.data.repositories.dispute_repository import DisputeRepository
-    from src.data.repositories.sla_repository import SLARepository
     from src.data.repositories.escalation_repository import EscalationRepository
-    from src.core.services.sla_service import SLAService
-    from src.core.services.escalation_service import EscalationService
-    from src.core.services.audit_service import AuditService
     from src.data.repositories.other_repositories import ActivityRepository
-    from src.core.config.settings import settings
+    from src.data.repositories.sla_repository import SLARepository
 
     async with AsyncSessionLocal() as db:
         dispute_repo = DisputeRepository(db)
@@ -62,10 +60,19 @@ async def run_sla_monitoring_async() -> int:
 
         audit_service = AuditService(activity_repo)
         sla_service = SLAService(sla_repo, dispute_repo, audit_service, settings)
-        escalation_service = EscalationService(escalation_repo, sla_repo, dispute_repo, audit_service)
+        escalation_service = EscalationService(
+            escalation_repo, sla_repo, dispute_repo, audit_service
+        )
 
         # Get open/active disputes
-        active_statuses = ["OPEN", "IN_REVIEW", "WAITING_CUSTOMER", "WAITING_INTERNAL_TEAM", "WAITING_ASSOCIATE_APPROVAL", "ESCALATED"]
+        active_statuses = [
+            "OPEN",
+            "IN_REVIEW",
+            "WAITING_CUSTOMER",
+            "WAITING_INTERNAL_TEAM",
+            "WAITING_ASSOCIATE_APPROVAL",
+            "ESCALATED",
+        ]
         disputes = await dispute_repo.list_disputes(limit=1000)
         active_disputes = [d for d in disputes if d.status in active_statuses]
 
@@ -78,19 +85,25 @@ async def run_sla_monitoring_async() -> int:
                 await escalation_service.check_and_trigger_escalations(dispute.id)
                 count += 1
             except Exception as e:
-                logger.error("Failed to run SLA/Escalation check for dispute %s: %s", dispute.id, str(e))
+                logger.error(
+                    "Failed to run SLA/Escalation check for dispute %s: %s",
+                    dispute.id,
+                    str(e),
+                )
 
         await db.commit()
         return count
 
 
-async def handle_task_failure_async(dispute_id_str: str, err: Exception, stack: str, retries: int) -> None:
+async def handle_task_failure_async(
+    dispute_id_str: str, err: Exception, stack: str, retries: int
+) -> None:
     """Records a task workflow execution failure to the Review Queue on max retries exhaustion."""
+    from src.core.services.audit_service import AuditService
     from src.data.clients.postgres_client import AsyncSessionLocal
     from src.data.repositories.dispute_repository import DisputeRepository
-    from src.data.repositories.review_queue_repository import ReviewQueueRepository
     from src.data.repositories.other_repositories import ActivityRepository
-    from src.core.services.audit_service import AuditService
+    from src.data.repositories.review_queue_repository import ReviewQueueRepository
 
     dispute_id = UUID(dispute_id_str)
 
@@ -150,9 +163,9 @@ def run_sla_monitoring(self: Task) -> int:
 
 async def process_dispute_case_async(case_id_str: str) -> None:
     """Runs Case Intake and TriageAgent nodes, then spawns workflows for each generated dispute."""
+    from src.core.workflow.graph import get_graph
     from src.data.clients.postgres_client import AsyncSessionLocal
     from src.data.repositories.case_repository import CaseRepository
-    from src.core.workflow.graph import get_graph
 
     case_id = UUID(case_id_str)
     async with AsyncSessionLocal() as db:
@@ -204,11 +217,12 @@ def process_dispute_case(self: Task, case_id_str: str) -> str:
 
 async def process_dispute_workflow_async(dispute_id_str: str) -> None:
     """Runs dispute validation, correlation, assignment, and routing nodes asynchronously."""
-    from src.data.clients.postgres_client import AsyncSessionLocal
-    from src.data.repositories.dispute_repository import DisputeRepository
-    from src.data.repositories.case_repository import CaseRepository
-    from src.core.workflow.graph import get_graph
     from langgraph.errors import NodeInterrupt
+
+    from src.core.workflow.graph import get_graph
+    from src.data.clients.postgres_client import AsyncSessionLocal
+    from src.data.repositories.case_repository import CaseRepository
+    from src.data.repositories.dispute_repository import DisputeRepository
 
     dispute_id = UUID(dispute_id_str)
     async with AsyncSessionLocal() as db:
@@ -269,6 +283,7 @@ async def process_dispute_workflow_async(dispute_id_str: str) -> None:
 def process_dispute_workflow(self: Task, dispute_id_str: str) -> str:
     """Celery task executing LangGraph workflow, protected by Redis distributed locking."""
     import redis
+
     from src.core.config.settings import settings
 
     lock_key = f"dispute:{dispute_id_str}"
@@ -277,7 +292,9 @@ def process_dispute_workflow(self: Task, dispute_id_str: str) -> str:
     # Acquire Redis Distributed Lock (TTL 30 minutes)
     acquired = redis_client.set(lock_key, "locked", ex=1800, nx=True)
     if not acquired:
-        logger.info("Distributed lock for %s is already held. Requeuing task.", lock_key)
+        logger.info(
+            "Distributed lock for %s is already held. Requeuing task.", lock_key
+        )
         raise self.retry(countdown=10)
 
     try:
@@ -297,9 +314,10 @@ def process_dispute_workflow(self: Task, dispute_id_str: str) -> str:
 
 async def resume_dispute_workflow_async(dispute_id_str: str) -> None:
     """Asynchronously resumes workflow via resume service."""
-    from src.data.clients.postgres_client import AsyncSessionLocal
-    from src.core.workflow.resume_service import DisputeResumeService
     from langgraph.errors import NodeInterrupt
+
+    from src.core.workflow.resume_service import DisputeResumeService
+    from src.data.clients.postgres_client import AsyncSessionLocal
 
     dispute_id = UUID(dispute_id_str)
     async with AsyncSessionLocal() as db:
@@ -335,11 +353,11 @@ def resume_dispute_workflow(self: Task, dispute_id_str: str) -> str:
 
 async def replay_failed_workflow_async(review_item_id: UUID) -> None:
     """Deletes/resolves review queue item and restarts the workflow task."""
+    from src.core.services.audit_service import AuditService
     from src.data.clients.postgres_client import AsyncSessionLocal
-    from src.data.repositories.review_queue_repository import ReviewQueueRepository
     from src.data.repositories.dispute_repository import DisputeRepository
     from src.data.repositories.other_repositories import ActivityRepository
-    from src.core.services.audit_service import AuditService
+    from src.data.repositories.review_queue_repository import ReviewQueueRepository
 
     async with AsyncSessionLocal() as db:
         review_repo = ReviewQueueRepository(db)

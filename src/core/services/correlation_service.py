@@ -68,11 +68,13 @@ class CorrelationService:
         collapsed_cat = self.collapse_category(raw_category)
 
         # 1. Search for active dispute matching invoice number and collapsed category
-        matched_dispute = await self.dispute_repo.find_active_dispute_by_invoice_and_category(
-            invoice_number=invoice_number,
-            dispute_category=collapsed_cat,
-            active_statuses=self.ACTIVE_STATUSES,
-            exclude_dispute_id=exclude_dispute_id,
+        matched_dispute = (
+            await self.dispute_repo.find_active_dispute_by_invoice_and_category(
+                invoice_number=invoice_number,
+                dispute_category=collapsed_cat,
+                active_statuses=self.ACTIVE_STATUSES,
+                exclude_dispute_id=exclude_dispute_id,
+            )
         )
 
         if not matched_dispute:

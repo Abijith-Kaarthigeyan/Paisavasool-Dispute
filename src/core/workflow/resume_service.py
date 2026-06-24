@@ -1,7 +1,8 @@
 """Workflow resume service for resuming paused/interrupted dispute processes."""
 
-from typing import Any, Dict, Optional
+from typing import Any
 from uuid import UUID
+
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -15,9 +16,9 @@ class DisputeResumeService:
         self,
         db: AsyncSession,
         dispute_id: UUID,
-        state_updates: Optional[Dict[str, Any]] = None,
-        as_node: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        state_updates: dict[str, Any] | None = None,
+        as_node: str | None = None,
+    ) -> dict[str, Any]:
         """Loads context, applies state updates, and triggers LangGraph resumption.
 
         Args:

@@ -3,9 +3,9 @@
 import json
 import re
 import time
-from typing import Any, Dict, List, Tuple
+from typing import Any
+
 import httpx
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.config.settings import settings
 from src.observability.logging.logger import logger
@@ -67,7 +67,9 @@ class DisputeTriageAgent:
             return clean.upper()
 
     @classmethod
-    def _regex_fallback(cls, subject: str, body: str, raw_content: str | None = None) -> Dict[str, Any]:
+    def _regex_fallback(
+        cls, subject: str, body: str, raw_content: str | None = None
+    ) -> dict[str, Any]:
         """Deterministic regex fallback parser when LLM is unavailable or offline."""
         logger.info("Executing regex/fallback triage parser")
         content = raw_content if raw_content else f"{subject}\n{body}"
@@ -184,13 +186,15 @@ class DisputeTriageAgent:
         subject: str,
         body: str,
         raw_content: str | None = None,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Triages customer communication extracting invoices, categories, and confidence.
 
         Returns:
             Dict containing 'invoices', 'confidence', and 'agent_run_details'.
         """
-        communication_text = raw_content if raw_content else f"Subject: {subject}\nBody: {body}"
+        communication_text = (
+            raw_content if raw_content else f"Subject: {subject}\nBody: {body}"
+        )
         prompt = f"""You are a Dispute Triage Agent. Analyze the following customer communication (email subject, body, and any extracted attachment content) and extract all referenced invoices and the dispute reasons.
 
 Communication Details:
@@ -225,7 +229,11 @@ Expected JSON schema:
         ]
 
         # Try OpenRouter models first
-        if openrouter_key and not openrouter_key.startswith("mock-") and openrouter_key.strip():
+        if (
+            openrouter_key
+            and not openrouter_key.startswith("mock-")
+            and openrouter_key.strip()
+        ):
             for model, provider in models_to_try:
                 start_time = time.time()
                 try:
@@ -257,11 +265,17 @@ Expected JSON schema:
                     # Parse output
                     parsed = cls._clean_and_parse_json(content)
                     return {
-                        "invoices": cls._normalize_extracted_invoices(parsed.get("invoices", [])),
+                        "invoices": cls._normalize_extracted_invoices(
+                            parsed.get("invoices", [])
+                        ),
                         "confidence": float(parsed.get("confidence", 90.0)),
                         "agent_run_details": {
                             "prompt": prompt,
-                            "input_payload": {"subject": subject, "body": body, "raw_content": raw_content},
+                            "input_payload": {
+                                "subject": subject,
+                                "body": body,
+                                "raw_content": raw_content,
+                            },
                             "output_payload": parsed,
                             "latency": latency,
                             "model": model,
@@ -291,18 +305,26 @@ Expected JSON schema:
                     resp = await client.post(url, json=payload, timeout=15.0)
                     resp.raise_for_status()
                     result_json = resp.json()
-                    content = result_json["candidates"][0]["content"]["parts"][0]["text"]
+                    content = result_json["candidates"][0]["content"]["parts"][0][
+                        "text"
+                    ]
 
                 latency = time.time() - start_time
                 logger.info("Direct Gemini triage succeeded.")
 
                 parsed = cls._clean_and_parse_json(content)
                 return {
-                    "invoices": cls._normalize_extracted_invoices(parsed.get("invoices", [])),
+                    "invoices": cls._normalize_extracted_invoices(
+                        parsed.get("invoices", [])
+                    ),
                     "confidence": float(parsed.get("confidence", 90.0)),
                     "agent_run_details": {
                         "prompt": prompt,
-                        "input_payload": {"subject": subject, "body": body, "raw_content": raw_content},
+                        "input_payload": {
+                            "subject": subject,
+                            "body": body,
+                            "raw_content": raw_content,
+                        },
                         "output_payload": parsed,
                         "latency": latency,
                         "model": model,
@@ -323,7 +345,11 @@ Expected JSON schema:
             "confidence": fallback_res["confidence"],
             "agent_run_details": {
                 "prompt": prompt,
-                "input_payload": {"subject": subject, "body": body, "raw_content": raw_content},
+                "input_payload": {
+                    "subject": subject,
+                    "body": body,
+                    "raw_content": raw_content,
+                },
                 "output_payload": fallback_res,
                 "latency": latency,
                 "model": "regex_fallback",
@@ -333,7 +359,7 @@ Expected JSON schema:
         }
 
     @classmethod
-    def _clean_and_parse_json(cls, content: str) -> Dict[str, Any]:
+    def _clean_and_parse_json(cls, content: str) -> dict[str, Any]:
         """Cleans potential markdown blocks and parses JSON string."""
         cleaned = content.strip()
         if cleaned.startswith("```"):
@@ -343,18 +369,22 @@ Expected JSON schema:
         return json.loads(cleaned.strip())
 
     @classmethod
-    def _normalize_extracted_invoices(cls, invoices: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _normalize_extracted_invoices(
+        cls, invoices: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
         """Ensures all dispute types extracted are mapped/normalized correctly."""
         normalized = []
         for inv in invoices:
             raw_num = inv.get("invoice_number", "INV-UNKNOWN")
             invoice_num = cls.normalize_invoice_number(raw_num)
             types = inv.get("dispute_types", [])
-            norm_types = list(set([cls.normalize_category(t) for t in types]))
+            norm_types = list({cls.normalize_category(t) for t in types})
             if not norm_types:
                 norm_types = ["OTHER"]
-            normalized.append({
-                "invoice_number": invoice_num,
-                "dispute_types": norm_types,
-            })
+            normalized.append(
+                {
+                    "invoice_number": invoice_num,
+                    "dispute_types": norm_types,
+                }
+            )
         return normalized
