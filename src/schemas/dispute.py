@@ -88,3 +88,16 @@ class ReviewQueueResponse(BaseModel):
     retry_count: int
     created_at: datetime
     updated_at: datetime
+
+
+class DisputeCommunicationResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
+
+    id: UUID
+    dispute_id: UUID
+    recipient: str
+    subject: str
+    message_body: str = Field(validation_alias="body")
+    communication_type: str
+    sent_time: datetime = Field(validation_alias="created_at")
+    created_at: datetime

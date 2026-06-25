@@ -205,9 +205,12 @@ async def test_mail_agent_fallback_templates():
                 activities_summary="",
                 comments_summary="",
                 invoice_summary="",
+                info_request="No payment reference or UTR was provided. Please reply with the UTR number and invoice number.",
+                invoice_number="INV-12345",
             )
             assert res["recipient"] == "client@company.com"
-            assert "Unique Transaction Reference" in res["body"]
+            assert "UTR number and invoice number" in res["body"]
+            assert "INV-12345" in res["body"]
 
 
 # --- 4. DETERMINISTIC PATH & ROUTING TESTS ---
@@ -334,6 +337,13 @@ async def test_payment_checker_missing_reference(db_session: AsyncSession):
 
         await db_session.refresh(dispute)
         assert dispute.status == "WAITING_CUSTOMER"
+
+        comm_repo = CommunicationRepository(db_session)
+        comms = await comm_repo.get_communications_for_dispute(dispute.id)
+        customer_comms = [c for c in comms if c.communication_type == "CUSTOMER"]
+        assert len(customer_comms) == 1
+        assert "UTR" in customer_comms[0].body
+        assert "INV-NOREF-TEST" in customer_comms[0].body
 
 
 # --- 5. END-TO-END WORFLOW ROUTING, RESUMPTION, & APPROVAL TESTS ---

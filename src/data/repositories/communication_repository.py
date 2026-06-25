@@ -33,6 +33,20 @@ class CommunicationRepository:
         )
         return list(result.scalars().all())
 
+    async def list_customer_communications_chronological(
+        self, dispute_id: UUID
+    ) -> list[DisputeCommunication]:
+        result = await self.db.execute(
+            select(DisputeCommunication)
+            .where(
+                DisputeCommunication.dispute_id == dispute_id,
+                DisputeCommunication.communication_type == "CUSTOMER",
+                DisputeCommunication.is_deleted.is_(False),
+            )
+            .order_by(DisputeCommunication.created_at.asc())
+        )
+        return list(result.scalars().all())
+
     async def create_communication(
         self,
         *,

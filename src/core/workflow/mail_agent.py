@@ -20,6 +20,8 @@ class DisputeMailAgent:
         dispute_category: str,
         outcome: str,
         customer_email: str,
+        info_request: str | None = None,
+        invoice_number: str | None = None,
     ) -> dict[str, Any]:
         """Provides high-quality, structured fallback templates for emails when LLM is unavailable."""
         logger.info("Executing template fallback email generator")
@@ -47,13 +49,21 @@ class DisputeMailAgent:
                 "Paisa Vasool Customer Support Team"
             )
         elif outcome == "NEED_MORE_INFO":
+            request_text = (
+                info_request
+                or "We require additional information to complete our investigation."
+            )
+            if invoice_number:
+                invoice_prompt = (
+                    f"Please reply with the requested details along with your "
+                    f"invoice number ({invoice_number})."
+                )
+            else:
+                invoice_prompt = "Please reply with the requested details along with your invoice number."
             body = (
                 "Dear Customer,\n\n"
-                "We are currently reviewing your dispute but require additional information to complete our investigation. "
-                "Please reply to this email with one of the following:\n"
-                "- A copy of the bank transfer advice or wire receipt\n"
-                "- The Unique Transaction Reference (UTR) number\n"
-                "- Any other supporting documentation\n\n"
+                f"{request_text}\n\n"
+                f"{invoice_prompt}\n\n"
                 "Once received, we will resume the validation immediately.\n\n"
                 "Best regards,\n"
                 "Paisa Vasool Customer Support Team"
@@ -87,6 +97,8 @@ class DisputeMailAgent:
         activities_summary: str,
         comments_summary: str,
         invoice_summary: str,
+        info_request: str | None = None,
+        invoice_number: str | None = None,
     ) -> dict[str, Any]:
         """Generates customized email subject and body for dispute updates using LLM or fallback.
 
@@ -109,10 +121,16 @@ Context Comments:
 Invoice Details:
 {invoice_summary}
 
+Information Requested from Customer:
+{info_request or "Additional details needed to proceed."}
+
+Invoice Number on Record:
+{invoice_number or "Not specified"}
+
 Based on the outcome, draft a professional, polite customer support email:
 - CUSTOMER_CORRECT: Inform them that we validated their concern and adjusted details, thanking them.
 - COMPANY_CORRECT: Politely explain that records show the original invoice is correct.
-- NEED_MORE_INFO: Prompt them to provide their UTR, transaction reference, or copies of supporting documents.
+- NEED_MORE_INFO: Clearly explain what information is needed using the "Information Requested from Customer" field above. Always ask the customer to reply with the requested details along with their invoice number.
 - OPERATIONAL_ESCALATION (or internal review): Notify them that we escalated the case to the operations department for review.
 
 Output a raw JSON object ONLY. Do not wrap in markdown code blocks.
@@ -246,7 +264,13 @@ Expected JSON Schema:
 
         # Template Fallback
         start_time = time.time()
-        fallback_res = cls._template_fallback(dispute_category, outcome, customer_email)
+        fallback_res = cls._template_fallback(
+            dispute_category,
+            outcome,
+            customer_email,
+            info_request=info_request,
+            invoice_number=invoice_number,
+        )
         latency = time.time() - start_time
 
         return {

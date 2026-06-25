@@ -5,7 +5,14 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
+from src.data.models.postgres.case import DisputeCase
 from src.data.models.postgres.dispute import Dispute
+
+
+def _normalize_invoice_number(invoice_number: str) -> str:
+    from src.core.workflow.triage_agent import DisputeTriageAgent
+
+    return DisputeTriageAgent.normalize_invoice_number(invoice_number)
 
 
 class DisputeRepository:
@@ -108,3 +115,57 @@ class DisputeRepository:
 
         result = await self.db.execute(query)
         return result.scalars().first()
+
+    async def find_active_disputes_by_invoice_number(
+        self,
+        invoice_number: str,
+        active_statuses: list[str],
+        exclude_dispute_id: UUID | None = None,
+    ) -> list[Dispute]:
+        """Find active disputes whose normalized invoice number matches the target."""
+        target = _normalize_invoice_number(invoice_number)
+        if not target:
+            return []
+
+        query = select(Dispute).where(
+            Dispute.status.in_(active_statuses),
+            Dispute.is_deleted.is_(False),
+        )
+        if exclude_dispute_id:
+            query = query.where(Dispute.id != exclude_dispute_id)
+
+        result = await self.db.execute(query)
+        disputes = list(result.scalars().all())
+        return [
+            dispute
+            for dispute in disputes
+            if _normalize_invoice_number(dispute.invoice_number) == target
+        ]
+
+    async def find_waiting_customer_disputes_by_email(
+        self,
+        customer_email: str,
+    ) -> list[Dispute]:
+        """Find WAITING_CUSTOMER disputes for the same customer email (newest first)."""
+        normalized_email = (customer_email or "").strip().lower()
+        if not normalized_email:
+            return []
+
+        query = (
+            select(Dispute)
+            .join(DisputeCase, Dispute.case_id == DisputeCase.id)
+            .options(joinedload(Dispute.case))
+            .where(
+                Dispute.status == "WAITING_CUSTOMER",
+                Dispute.is_deleted.is_(False),
+                DisputeCase.is_deleted.is_(False),
+            )
+            .order_by(Dispute.updated_at.desc())
+        )
+        result = await self.db.execute(query)
+        disputes = list(result.scalars().all())
+        return [
+            dispute
+            for dispute in disputes
+            if (dispute.case.customer_email or "").strip().lower() == normalized_email
+        ]

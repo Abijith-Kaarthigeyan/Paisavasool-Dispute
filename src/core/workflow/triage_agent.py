@@ -74,10 +74,18 @@ class DisputeTriageAgent:
         logger.info("Executing regex/fallback triage parser")
         content = raw_content if raw_content else f"{subject}\n{body}"
 
-        # 1. Extract invoice numbers (INV-XXXX)
+        # 1. Extract invoice numbers (INV-XXXX and "invoice 2599" style references)
         invoice_numbers = re.findall(r"\bINV-\d+\b", content, re.IGNORECASE)
+        bare_invoice_numbers = re.findall(r"(?i)\binvoice\s*#?\s*(\d+)\b", content)
+        for bare_num in bare_invoice_numbers:
+            invoice_numbers.append(f"INV-{bare_num}")
         # De-duplicate while preserving order
-        unique_invoices = list(dict.fromkeys([num.upper() for num in invoice_numbers]))
+        unique_invoices = list(
+            dict.fromkeys(
+                [cls.normalize_invoice_number(num) for num in invoice_numbers]
+            )
+        )
+        unique_invoices = [inv for inv in unique_invoices if inv]
 
         # 2. Extract dispute categories based on keywords
         invoices_list = []

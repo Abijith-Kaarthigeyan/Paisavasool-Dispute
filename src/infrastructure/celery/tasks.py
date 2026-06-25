@@ -193,8 +193,22 @@ async def process_dispute_case_async(case_id_str: str) -> None:
             "errors": [],
             "metadata": {},
         }
-        await graph.ainvoke(initial_state, config)
+        final_state = await graph.ainvoke(initial_state, config)
         await db.commit()
+
+        metadata = final_state.get("metadata") if isinstance(final_state, dict) else {}
+        resume_dispute_id = metadata.get("resume_dispute_id")
+        if resume_dispute_id:
+            from src.infrastructure.celery.tasks import (
+                resume_dispute_workflow_after_customer_reply,
+            )
+
+            resume_dispute_workflow_after_customer_reply.delay(
+                resume_dispute_id,
+                case.email_subject or "",
+                case.email_body or "",
+                case.raw_content or "",
+            )
 
 
 @celery_app.task(
@@ -264,8 +278,24 @@ async def process_dispute_workflow_async(dispute_id_str: str) -> None:
             "metadata": {},
         }
         try:
-            await graph.ainvoke(initial_state, config)
+            final_state = await graph.ainvoke(initial_state, config)
             await db.commit()
+
+            metadata = (
+                final_state.get("metadata") if isinstance(final_state, dict) else {}
+            )
+            resume_dispute_id = metadata.get("resume_dispute_id")
+            if resume_dispute_id:
+                from src.infrastructure.celery.tasks import (
+                    resume_dispute_workflow_after_customer_reply,
+                )
+
+                resume_dispute_workflow_after_customer_reply.delay(
+                    resume_dispute_id,
+                    case.email_subject or "",
+                    case.email_body or "",
+                    case.raw_content or "",
+                )
         except NodeInterrupt as e:
             await db.commit()
             logger.info("Workflow paused on human interrupt: %s", str(e))
@@ -310,6 +340,78 @@ def process_dispute_workflow(self: Task, dispute_id_str: str) -> str:
             raise e
     finally:
         redis_client.delete(lock_key)
+
+
+async def resume_dispute_workflow_after_customer_reply_async(
+    dispute_id_str: str,
+    email_subject: str,
+    email_body: str,
+    raw_content: str = "",
+) -> None:
+    """Resumes a paused dispute workflow after the customer replies with more information."""
+    from langgraph.errors import NodeInterrupt
+
+    from src.core.workflow.resume_service import DisputeResumeService
+    from src.data.clients.postgres_client import AsyncSessionLocal
+    from src.data.repositories.dispute_repository import DisputeRepository
+
+    dispute_id = UUID(dispute_id_str)
+    async with AsyncSessionLocal() as db:
+        dispute_repo = DisputeRepository(db)
+        dispute = await dispute_repo.get_by_id(dispute_id)
+        if not dispute:
+            return
+
+        resume_service = DisputeResumeService()
+        state_updates = {
+            "email_subject": email_subject,
+            "email_body": email_body,
+            "raw_content": raw_content
+            or f"Subject: {email_subject}\nBody: {email_body}",
+        }
+        try:
+            await resume_service.resume_workflow(
+                db, dispute_id, state_updates=state_updates
+            )
+            await db.commit()
+        except NodeInterrupt as e:
+            await db.commit()
+            logger.info(
+                "Workflow paused again after customer reply for dispute %s: %s",
+                dispute_id,
+                str(e),
+            )
+        except Exception as e:
+            await db.rollback()
+            raise e
+
+
+@celery_app.task(
+    bind=True,
+    name="src.infrastructure.celery.tasks.resume_dispute_workflow_after_customer_reply",
+    max_retries=2,
+    queue="dispute_processing",
+)
+def resume_dispute_workflow_after_customer_reply(
+    self: Task,
+    dispute_id_str: str,
+    email_subject: str,
+    email_body: str,
+    raw_content: str = "",
+) -> str:
+    """Celery task to resume a dispute after a correlated customer reply email."""
+    try:
+        _run_async(
+            resume_dispute_workflow_after_customer_reply_async(
+                dispute_id_str, email_subject, email_body, raw_content
+            )
+        )
+        return "SUCCESS"
+    except Exception as e:
+        retry_count = self.request.retries
+        if retry_count < self.max_retries:
+            raise self.retry(exc=e, countdown=10)
+        raise e
 
 
 async def resume_dispute_workflow_async(dispute_id_str: str) -> None:

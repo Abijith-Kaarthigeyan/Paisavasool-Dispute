@@ -7,6 +7,7 @@ from src.core.services.audit_service import AuditService
 from src.data.models.postgres.sla import DisputeSLA
 from src.data.repositories.dispute_repository import DisputeRepository
 from src.data.repositories.sla_repository import SLARepository
+from src.observability.logging.logger import logger
 
 
 class SLAService:
@@ -76,8 +77,23 @@ class SLAService:
 
         now = datetime.now(UTC)
 
+        # Transitioning TO CLOSED/RESOLVED: Stop SLA (Pause it permanently)
+        if new_status in ["CLOSED", "RESOLVED"] and not sla.is_paused:
+            sla.is_paused = True
+            sla.paused_at = now
+            await self.sla_repo.update_sla(sla)
+
+            await self.audit_service.log_event(
+                dispute_id=dispute_id,
+                action="SLA_PAUSED",
+                metadata={
+                    "paused_at": now.isoformat(),
+                    "reason": f"DISPUTE_{new_status}",
+                },
+            )
+
         # Transitioning TO WAITING_CUSTOMER: Pause SLA
-        if new_status == "WAITING_CUSTOMER" and not sla.is_paused:
+        elif new_status == "WAITING_CUSTOMER" and not sla.is_paused:
             sla.is_paused = True
             sla.paused_at = now
             await self.sla_repo.update_sla(sla)
@@ -88,10 +104,10 @@ class SLAService:
                 metadata={"paused_at": now.isoformat()},
             )
 
-        # Transitioning AWAY from WAITING_CUSTOMER: Resume SLA
+        # Transitioning AWAY from WAITING_CUSTOMER or CLOSED/RESOLVED: Resume SLA
         elif (
-            old_status == "WAITING_CUSTOMER"
-            and new_status != "WAITING_CUSTOMER"
+            old_status in ["WAITING_CUSTOMER", "CLOSED", "RESOLVED"]
+            and new_status not in ["WAITING_CUSTOMER", "CLOSED", "RESOLVED"]
             and sla.is_paused
         ):
             paused_at = (sla.paused_at or sla.started_at).replace(tzinfo=UTC)
@@ -113,13 +129,39 @@ class SLAService:
                 },
             )
 
-    async def calculate_progress(self, dispute_id: UUID) -> DisputeSLA:
+    async def calculate_progress(self, dispute_id: UUID) -> DisputeSLA | None:
         """Calculates active time elapsed, percentage of SLA used, and updates breach status."""
         sla = await self.sla_repo.get_by_dispute_id(dispute_id)
         if not sla:
-            raise ValidationException("SLA not found for dispute.")
+            logger.warning(
+                "SLA not found for dispute %s. Skipping progress calculation.",
+                dispute_id,
+            )
+            return None
+
+        dispute = await self.dispute_repo.get_by_id(dispute_id)
+        if not dispute:
+            raise ValidationException("Dispute not found.")
 
         now = datetime.now(UTC)
+
+        # If the dispute is CLOSED or RESOLVED, freeze/stop the SLA
+        if dispute.status in ["CLOSED", "RESOLVED"] and not sla.is_paused:
+            sla.is_paused = True
+            sla.paused_at = dispute.closed_at or dispute.resolved_at or now
+            if sla.paused_at.tzinfo is None:
+                sla.paused_at = sla.paused_at.replace(tzinfo=UTC)
+            await self.sla_repo.update_sla(sla)
+
+            await self.audit_service.log_event(
+                dispute_id=dispute_id,
+                action="SLA_PAUSED",
+                metadata={
+                    "paused_at": sla.paused_at.isoformat(),
+                    "reason": f"DISPUTE_{dispute.status}",
+                },
+            )
+
         started_at = sla.started_at.replace(tzinfo=UTC)
 
         if sla.is_paused:
@@ -140,7 +182,9 @@ class SLAService:
         if percentage >= 100.0:
             sla.status = "BREACHED"
             if not sla.breached_at:
-                sla.breached_at = now
+                sla.breached_at = (sla.paused_at if sla.is_paused else now).replace(
+                    tzinfo=UTC
+                )
         elif percentage >= 80.0:
             sla.status = "AT_RISK"
         else:

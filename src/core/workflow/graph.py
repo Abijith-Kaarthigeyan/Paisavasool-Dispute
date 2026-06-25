@@ -13,6 +13,7 @@ from sqlalchemy import select, text
 from src.core.config.settings import settings
 from src.core.services.assignment_service import AssignmentService
 from src.core.services.audit_service import AuditService
+from src.core.services.conversation_history_service import ConversationHistoryService
 from src.core.services.correlation_service import CorrelationService
 from src.core.services.recommendation_service import RecommendationService
 from src.core.services.sla_service import SLAService
@@ -37,7 +38,145 @@ from src.data.repositories.recommendation_repository import RecommendationReposi
 from src.data.repositories.review_queue_repository import ReviewQueueRepository
 from src.observability.logging.logger import logger
 
-# --- NODES ---
+# --- HELPERS ---
+
+
+async def _record_mail_agent_run(
+    db: Any,
+    dispute_id: UUID,
+    run_details: dict[str, Any],
+) -> None:
+    """Persists DisputeMailAgent execution metadata."""
+    agent_run_repo = AgentRunRepository(db)
+    agent_run = await agent_run_repo.create_agent_run(
+        dispute_id=dispute_id,
+        agent_name="DisputeMailAgent",
+        input_payload=run_details.get("input_payload"),
+        status=run_details.get("status"),
+    )
+    agent_run.started_at = datetime.now() - timedelta(
+        seconds=(run_details.get("latency") or 0)
+    )
+    agent_run.completed_at = datetime.now()
+    agent_run.output_payload = {
+        "prompt": run_details.get("prompt"),
+        "output": run_details.get("output_payload"),
+        "latency": run_details.get("latency"),
+        "model": run_details.get("model"),
+        "provider": run_details.get("provider"),
+    }
+    await agent_run_repo.update_agent_run(agent_run)
+
+
+async def _persist_outbound_customer_mail(
+    db: Any,
+    dispute_id: UUID,
+    agent_res: dict[str, Any],
+) -> None:
+    """Stores a generated outbound customer email in dispute_communications."""
+    comm_repo = CommunicationRepository(db)
+    run_details = agent_res.get("agent_run_details")
+    if run_details:
+        await _record_mail_agent_run(db, dispute_id, run_details)
+
+    await comm_repo.create_communication(
+        dispute_id=dispute_id,
+        recipient=agent_res["recipient"],
+        subject=agent_res["subject"],
+        body=agent_res["body"],
+        communication_type="CUSTOMER",
+    )
+
+
+async def _persist_inbound_customer_email(
+    *,
+    db: Any,
+    dispute_id: UUID,
+    customer_email: str,
+    email_subject: str,
+    email_body: str,
+) -> None:
+    """Stores the original customer email on the dispute if not already recorded."""
+    if not (email_subject or "").strip() and not (email_body or "").strip():
+        return
+
+    comm_repo = CommunicationRepository(db)
+    comms = await comm_repo.get_communications_for_dispute(dispute_id)
+    normalized_subject = (email_subject or "").strip()
+    normalized_body = email_body or ""
+    already_recorded = any(
+        c.communication_type == "CUSTOMER"
+        and (c.subject or "").strip() == normalized_subject
+        and c.body == normalized_body
+        for c in comms
+    )
+    if already_recorded:
+        return
+
+    await comm_repo.create_communication(
+        dispute_id=dispute_id,
+        recipient=customer_email or "customer@example.com",
+        subject=normalized_subject or "(No Subject)",
+        body=normalized_body,
+        communication_type="CUSTOMER",
+    )
+
+
+async def _notify_customer_need_more_info(
+    *,
+    db: Any,
+    dispute: Any,
+    state: DisputeWorkflowState,
+    info_request: str,
+) -> None:
+    """Generates and persists a customer email describing what additional info is needed."""
+    await _send_customer_outbound_mail(
+        db=db,
+        dispute_id=dispute.id,
+        dispute=dispute,
+        state=state,
+        outcome="NEED_MORE_INFO",
+        info_request=info_request,
+    )
+
+
+async def _send_customer_outbound_mail(
+    *,
+    db: Any,
+    dispute_id: UUID,
+    dispute: Any,
+    state: DisputeWorkflowState,
+    outcome: str,
+    info_request: str | None = None,
+) -> None:
+    """Generates and persists a customer-facing email for the given workflow outcome."""
+    activity_repo = ActivityRepository(db)
+    comments_repo = CommentRepository(db)
+
+    activities = await activity_repo.list_activities_for_dispute(dispute_id)
+    act_summary = "\n".join(
+        [f"- {a.activity_type}: {a.activity_metadata}" for a in activities]
+    )
+
+    comments = await comments_repo.list_comments_for_dispute(dispute_id)
+    comm_summary = "\n".join([f"- {c.comment_type}: {c.comment}" for c in comments])
+
+    invoice_json = state.get("metadata", {}).get("invoice_json", {})
+    recipient = state.get("customer_email") or "customer@example.com"
+    invoice_number = dispute.invoice_number or state.get("invoice_number")
+
+    agent_res = await DisputeMailAgent.generate_mail(
+        dispute_category=dispute.dispute_category,
+        outcome=outcome,
+        customer_email=recipient,
+        activities_summary=act_summary,
+        comments_summary=comm_summary,
+        invoice_summary=json.dumps(invoice_json),
+        info_request=info_request,
+        invoice_number=invoice_number,
+    )
+
+    await _persist_outbound_customer_mail(db, dispute_id, agent_res)
 
 
 async def case_intake_node(
@@ -149,6 +288,57 @@ async def triage_agent_node(
         else None,
         "metadata": metadata,
         "current_node": "triage_agent_node",
+    }
+
+
+async def pre_correlation_node(
+    state: DisputeWorkflowState, config: RunnableConfig
+) -> dict[str, Any]:
+    """Correlates incoming case email to an existing dispute before generating new ones."""
+    logger.info("[Node Start] pre_correlation_node")
+    if state.get("dispute_id"):
+        logger.info("[Node End] pre_correlation_node - Bypassed")
+        return {}
+
+    db = config["configurable"]["db"]
+    dispute_repo = DisputeRepository(db)
+    comm_repo = CommunicationRepository(db)
+    comment_repo = CommentRepository(db)
+    activity_repo = ActivityRepository(db)
+    audit_service = AuditService(activity_repo)
+
+    correlation_service = CorrelationService(
+        dispute_repo=dispute_repo,
+        communication_repo=comm_repo,
+        comment_repo=comment_repo,
+        audit_service=audit_service,
+    )
+
+    matched_id = await correlation_service.find_correlated_dispute_for_intake(
+        invoices=state.get("invoices") or [],
+        customer_email=state.get("customer_email") or "",
+        email_subject=state.get("email_subject") or "",
+        email_body=state.get("email_body") or "",
+        raw_content=state.get("raw_content") or "",
+    )
+
+    if matched_id:
+        logger.info(
+            "Pre-correlation matched existing dispute %s. Skipping dispute generation.",
+            matched_id,
+        )
+        metadata = dict(state.get("metadata") or {})
+        metadata["resume_dispute_id"] = str(matched_id)
+        return {
+            "workflow_status": "CORRELATED_EXISTING",
+            "current_node": "pre_correlation_node",
+            "metadata": metadata,
+        }
+
+    logger.info("[Node End] pre_correlation_node - No existing dispute match")
+    return {
+        "workflow_status": "NEW_INTAKE",
+        "current_node": "pre_correlation_node",
     }
 
 
@@ -367,13 +557,23 @@ async def correlation_node(
                 },
             )
 
+        metadata = dict(state.get("metadata") or {})
+        metadata["resume_dispute_id"] = str(matched_id)
         return {
             "workflow_status": "CANCELLED_DUPLICATE",
             "resolution_outcome": f"DUPLICATE_OF_{matched_id}",
             "current_node": "correlation_node",
+            "metadata": metadata,
         }
 
     logger.info("[Node End] correlation_node - Verified as NEW_DISPUTE")
+    await _persist_inbound_customer_email(
+        db=db,
+        dispute_id=dispute_id,
+        customer_email=state.get("customer_email") or "",
+        email_subject=state.get("email_subject") or "",
+        email_body=state.get("email_body") or "",
+    )
     return {
         "workflow_status": "NEW_DISPUTE",
         "current_node": "correlation_node",
@@ -686,18 +886,13 @@ async def amendment_resolution_node(
         return {}
 
     raw_customer_text = (
-        state.get("raw_content")
-        or f"Subject: {state.get('email_subject') or ''}\nBody: {state.get('email_body') or ''}"
+        await ConversationHistoryService.build_customer_conversation_text(
+            db,
+            dispute_id,
+            dispute,
+            state_fallback=state,
+        )
     )
-
-    # Read customer updates from comments
-    comment_repo = CommentRepository(db)
-    comments = await comment_repo.list_comments_for_dispute(dispute_id)
-    cust_comments = [
-        c.comment for c in comments if c.comment_type == "CUSTOMER_COMMENT"
-    ]
-    if cust_comments:
-        raw_customer_text += "\n\nCustomer Comments:\n" + "\n".join(cust_comments)
 
     invoice_json = state.get("metadata", {}).get("invoice_json", {})
 
@@ -735,6 +930,7 @@ async def amendment_resolution_node(
     # Persist Recommendation
     rec_repo = RecommendationRepository(db)
     activity_repo = ActivityRepository(db)
+    comment_repo = CommentRepository(db)
     audit_service = AuditService(activity_repo)
     rec_service = RecommendationService(rec_repo, audit_service)
 
@@ -747,10 +943,11 @@ async def amendment_resolution_node(
     )
 
     if outcome == "NEED_MORE_INFO":
+        info_request = agent_res["reasoning"]
         # Add internal comment
         await comment_repo.create_comment(
             dispute_id=dispute_id,
-            comment=f"Need More Info: {agent_res['reasoning']}",
+            comment=f"Need More Info: {info_request}",
             comment_type="INTERNAL",
             created_by=UUID("00000000-0000-0000-0000-000000000101"),
         )
@@ -759,6 +956,13 @@ async def amendment_resolution_node(
         dispute.status = "WAITING_CUSTOMER"
         dispute.resolution_outcome = "NEED_MORE_INFO"
         await dispute_repo.update_dispute(dispute)
+
+        await _notify_customer_need_more_info(
+            db=db,
+            dispute=dispute,
+            state=state,
+            info_request=info_request,
+        )
 
         # Pause SLA
         from src.core.services.sla_service import SLAService
@@ -816,18 +1020,13 @@ async def reference_extraction_node(
         return {}
 
     raw_customer_text = (
-        state.get("raw_content")
-        or f"Subject: {state.get('email_subject') or ''}\nBody: {state.get('email_body') or ''}"
+        await ConversationHistoryService.build_customer_conversation_text(
+            db,
+            dispute_id,
+            dispute,
+            state_fallback=state,
+        )
     )
-
-    # Read customer updates from comments
-    comment_repo = CommentRepository(db)
-    comments = await comment_repo.list_comments_for_dispute(dispute_id)
-    cust_comments = [
-        c.comment for c in comments if c.comment_type == "CUSTOMER_COMMENT"
-    ]
-    if cust_comments:
-        raw_customer_text += "\n\nCustomer Comments:\n" + "\n".join(cust_comments)
 
     agent_res = await PaymentReferenceExtractionAgent.extract_reference(
         raw_customer_text
@@ -889,47 +1088,50 @@ async def payment_checker_node(
     # and if the state doesn't have it, extract reference dynamically
     ref_num = state.get("metadata", {}).get("extracted_reference_number")
 
-    comments = await comment_repo.list_comments_for_dispute(dispute_id)
-    cust_comments = [
-        c.comment for c in comments if c.comment_type == "CUSTOMER_COMMENT"
-    ]
-    if not ref_num and cust_comments:
-        logger.info(
-            "Found customer comments on checker node. Executing reference extractor dynamically."
-        )
-        raw_customer_text = "\n".join(cust_comments)
-        agent_res = await PaymentReferenceExtractionAgent.extract_reference(
-            raw_customer_text
-        )
-        ref_num = agent_res.get("reference_number")
-
-        # Save run details
-        run_details = agent_res.get("agent_run_details")
-        if run_details:
-            agent_run_repo = AgentRunRepository(db)
-            agent_run = await agent_run_repo.create_agent_run(
-                dispute_id=dispute_id,
-                agent_name="PaymentReferenceExtractionAgent",
-                input_payload=run_details.get("input_payload"),
-                status=run_details.get("status"),
+    if not ref_num:
+        raw_customer_text = (
+            await ConversationHistoryService.build_customer_conversation_text(
+                db,
+                dispute_id,
+                dispute,
+                state_fallback=state,
             )
-            agent_run.started_at = datetime.now() - timedelta(
-                seconds=(run_details.get("latency") or 0)
+        )
+        if raw_customer_text.strip():
+            logger.info(
+                "No stored reference on checker node. Extracting from full customer history."
             )
-            agent_run.completed_at = datetime.now()
-            agent_run.output_payload = {
-                "prompt": run_details.get("prompt"),
-                "output": run_details.get("output_payload"),
-                "latency": run_details.get("latency"),
-                "model": run_details.get("model"),
-                "provider": run_details.get("provider"),
-            }
-            await agent_run_repo.update_agent_run(agent_run)
+            agent_res = await PaymentReferenceExtractionAgent.extract_reference(
+                raw_customer_text
+            )
+            ref_num = agent_res.get("reference_number")
 
-        if ref_num:
-            metadata = dict(state.get("metadata") or {})
-            metadata["extracted_reference_number"] = ref_num
-            state["metadata"] = metadata
+            run_details = agent_res.get("agent_run_details")
+            if run_details:
+                agent_run_repo = AgentRunRepository(db)
+                agent_run = await agent_run_repo.create_agent_run(
+                    dispute_id=dispute_id,
+                    agent_name="PaymentReferenceExtractionAgent",
+                    input_payload=run_details.get("input_payload"),
+                    status=run_details.get("status"),
+                )
+                agent_run.started_at = datetime.now() - timedelta(
+                    seconds=(run_details.get("latency") or 0)
+                )
+                agent_run.completed_at = datetime.now()
+                agent_run.output_payload = {
+                    "prompt": run_details.get("prompt"),
+                    "output": run_details.get("output_payload"),
+                    "latency": run_details.get("latency"),
+                    "model": run_details.get("model"),
+                    "provider": run_details.get("provider"),
+                }
+                await agent_run_repo.update_agent_run(agent_run)
+
+            if ref_num:
+                metadata = dict(state.get("metadata") or {})
+                metadata["extracted_reference_number"] = ref_num
+                state["metadata"] = metadata
 
     ar_client = ARServiceClient()
 
@@ -961,9 +1163,13 @@ async def payment_checker_node(
     # Step 2: Reference exists?
     if not ref_num:
         # NO REFERENCE
+        info_request = (
+            "No payment reference or UTR was provided. "
+            "Please reply with the UTR number and invoice number."
+        )
         await comment_repo.create_comment(
             dispute_id=dispute_id,
-            comment="No payment reference or UTR was provided. Please reply with the UTR number.",
+            comment=info_request,
             comment_type="INTERNAL",
             created_by=UUID("00000000-0000-0000-0000-000000000101"),
         )
@@ -972,6 +1178,13 @@ async def payment_checker_node(
         dispute.status = "WAITING_CUSTOMER"
         dispute.resolution_outcome = "NEED_MORE_INFO"
         await dispute_repo.update_dispute(dispute)
+
+        await _notify_customer_need_more_info(
+            db=db,
+            dispute=dispute,
+            state=state,
+            info_request=info_request,
+        )
 
         # Pause SLA
         from src.core.services.sla_service import SLAService
@@ -1085,6 +1298,14 @@ async def department_contact_node(
         metadata={"department": target_dept, "category": category},
     )
 
+    await _send_customer_outbound_mail(
+        db=db,
+        dispute_id=dispute_id,
+        dispute=dispute,
+        state=state,
+        outcome="OPERATIONAL_ESCALATION",
+    )
+
     # Set waiting status
     return {
         "resolution_outcome": "PENDING_INTERNAL_REVIEW",
@@ -1106,62 +1327,14 @@ async def mail_agent_node(
     if not dispute:
         return {}
 
-    activity_repo = ActivityRepository(db)
-    comments_repo = CommentRepository(db)
-    comm_repo = CommunicationRepository(db)
-
-    # Fetch context logs
-    activities = await activity_repo.list_activities_for_dispute(dispute_id)
-    act_summary = "\n".join(
-        [f"- {a.activity_type}: {a.activity_metadata}" for a in activities]
-    )
-
-    comments = await comments_repo.list_comments_for_dispute(dispute_id)
-    comm_summary = "\n".join([f"- {c.comment_type}: {c.comment}" for c in comments])
-
-    invoice_json = state.get("metadata", {}).get("invoice_json", {})
-    recipient = state.get("customer_email") or "customer@example.com"
     outcome = state.get("resolution_outcome") or dispute.resolution_outcome or "UNKNOWN"
 
-    agent_res = await DisputeMailAgent.generate_mail(
-        dispute_category=dispute.dispute_category,
-        outcome=outcome,
-        customer_email=recipient,
-        activities_summary=act_summary,
-        comments_summary=comm_summary,
-        invoice_summary=json.dumps(invoice_json),
-    )
-
-    # Agent Run Tracking
-    run_details = agent_res.get("agent_run_details")
-    if run_details:
-        agent_run_repo = AgentRunRepository(db)
-        agent_run = await agent_run_repo.create_agent_run(
-            dispute_id=dispute_id,
-            agent_name="DisputeMailAgent",
-            input_payload=run_details.get("input_payload"),
-            status=run_details.get("status"),
-        )
-        agent_run.started_at = datetime.now() - timedelta(
-            seconds=(run_details.get("latency") or 0)
-        )
-        agent_run.completed_at = datetime.now()
-        agent_run.output_payload = {
-            "prompt": run_details.get("prompt"),
-            "output": run_details.get("output_payload"),
-            "latency": run_details.get("latency"),
-            "model": run_details.get("model"),
-            "provider": run_details.get("provider"),
-        }
-        await agent_run_repo.update_agent_run(agent_run)
-
-    # Persist communication
-    await comm_repo.create_communication(
+    await _send_customer_outbound_mail(
+        db=db,
         dispute_id=dispute_id,
-        recipient=agent_res["recipient"],
-        subject=agent_res["subject"],
-        body=agent_res["body"],
-        communication_type="CUSTOMER",
+        dispute=dispute,
+        state=state,
+        outcome=outcome,
     )
 
     return {
@@ -1204,6 +1377,17 @@ async def close_dispute_node(
     dispute.closed_at = now
     await dispute_repo.update_dispute(dispute)
 
+    activity_repo = ActivityRepository(db)
+    audit_service = AuditService(activity_repo)
+
+    # Stop SLA monitoring and record final progress
+    from src.core.services.sla_service import SLAService
+    from src.data.repositories.sla_repository import SLARepository
+
+    sla_service = SLAService(SLARepository(db), dispute_repo, audit_service, settings)
+    await sla_service.handle_status_change(dispute.id, old_status, "CLOSED")
+    await sla_service.calculate_progress(dispute.id)
+
     # Call AR Service to resume collections
     ar_client = ARServiceClient()
     try:
@@ -1211,8 +1395,6 @@ async def close_dispute_node(
     except Exception as e:
         logger.error("Failed to resume collections in AR service: %s", str(e))
 
-    activity_repo = ActivityRepository(db)
-    audit_service = AuditService(activity_repo)
     await audit_service.log_event(
         dispute_id=dispute_id,
         action="STATUS_CHANGED",
@@ -1385,7 +1567,21 @@ def route_after_triage(state: DisputeWorkflowState) -> str:
     if state.get("dispute_id"):
         # Bypass for dispute workflow execution
         return "correlation_node"
+    return "pre_correlation_node"
+
+
+def route_after_pre_correlation(state: DisputeWorkflowState) -> str:
+    """Routes after pre-correlation: resume existing dispute or generate new ones."""
+    if state.get("workflow_status") == "CORRELATED_EXISTING":
+        return END
     return "dispute_generation_node"
+
+
+def route_after_correlation(state: DisputeWorkflowState) -> str:
+    """Stops duplicate disputes from continuing through resolution nodes."""
+    if state.get("workflow_status") == "CANCELLED_DUPLICATE":
+        return END
+    return "assignment_node"
 
 
 def route_after_validation(state: DisputeWorkflowState) -> str:
@@ -1459,6 +1655,7 @@ def create_graph() -> StateGraph:
     # Nodes
     workflow.add_node("case_intake_node", case_intake_node)
     workflow.add_node("triage_agent_node", triage_agent_node)
+    workflow.add_node("pre_correlation_node", pre_correlation_node)
     workflow.add_node("dispute_generation_node", dispute_generation_node)
     workflow.add_node("correlation_node", correlation_node)
     workflow.add_node("assignment_node", assignment_node)
@@ -1492,13 +1689,28 @@ def create_graph() -> StateGraph:
         "triage_agent_node",
         route_after_triage,
         {
-            "dispute_generation_node": "dispute_generation_node",
+            "pre_correlation_node": "pre_correlation_node",
             "correlation_node": "correlation_node",
+        },
+    )
+    workflow.add_conditional_edges(
+        "pre_correlation_node",
+        route_after_pre_correlation,
+        {
+            "dispute_generation_node": "dispute_generation_node",
+            END: END,
         },
     )
     workflow.add_edge("dispute_generation_node", END)
 
-    workflow.add_edge("correlation_node", "assignment_node")
+    workflow.add_conditional_edges(
+        "correlation_node",
+        route_after_correlation,
+        {
+            "assignment_node": "assignment_node",
+            END: END,
+        },
+    )
     workflow.add_edge("assignment_node", "validation_node")
 
     workflow.add_conditional_edges(

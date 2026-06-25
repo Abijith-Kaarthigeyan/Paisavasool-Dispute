@@ -60,8 +60,10 @@ class AmendmentResolutionAgent:
         prompt = f"""You are a Dispute Resolution Agent specialized in invoice amendments.
 Compare the customer's claims/complaint against the invoice details and category to determine if the customer is correct, company is correct, or if we need more info.
 
+This is a multi-turn conversation. Earlier messages establish the customer's original dispute claim; later messages may provide additional documents or clarification requested by our team. Read the FULL conversation chronologically before deciding.
+
 Dispute Category: {dispute_category}
-Customer Claims/Text:
+Customer Conversation History (oldest to newest):
 {raw_customer_text}
 
 Invoice JSON:

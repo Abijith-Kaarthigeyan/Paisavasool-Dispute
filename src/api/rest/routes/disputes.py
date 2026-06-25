@@ -29,6 +29,7 @@ from src.schemas.dispute import (
     DisputeActivityResponse,
     DisputeCommentCreate,
     DisputeCommentResponse,
+    DisputeCommunicationResponse,
     DisputeResponse,
 )
 
@@ -369,7 +370,7 @@ async def get_dispute_workflow_context(
     return context
 
 
-@router.get("/{id}/communications")
+@router.get("/{id}/communications", response_model=list[DisputeCommunicationResponse])
 async def get_dispute_communications(
     id: UUID,
     current_user: TokenPayload = Depends(require_finance),
@@ -377,7 +378,7 @@ async def get_dispute_communications(
 ):
     """Fetches communications history for a dispute."""
     comms = await comm_repo.get_communications_for_dispute(id)
-    return comms
+    return [DisputeCommunicationResponse.model_validate(c) for c in comms]
 
 
 @router.get("/{id}/evidence")
