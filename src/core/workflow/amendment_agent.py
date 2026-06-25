@@ -77,13 +77,43 @@ You must determine one of the following resolution outcomes:
 Provide a confidence score (0.0 to 100.0) and detailed reasoning.
 Only generate "recommended_invoice_json" if the resolution_outcome is "CUSTOMER_CORRECT". Otherwise it must be null.
 
+When generating "recommended_invoice_json", include the FULL corrected invoice using the same structure as the source invoice JSON:
+- invoice_number
+- customer_name
+- invoice_date (issue date)
+- due_date
+- subtotal_amount
+- tax_amount
+- total_amount
+- outstanding_amount (if applicable)
+- items: array of line items, each with description/product name, quantity, unit_price, and line amount
+
+Copy unchanged fields from the original invoice JSON when they are not being amended.
+
 You must output a raw JSON object ONLY. Do not wrap in markdown code blocks.
 Expected JSON Schema:
 {{
   "resolution_outcome": "CUSTOMER_CORRECT" | "COMPANY_CORRECT" | "NEED_MORE_INFO",
   "confidence": number,
   "reasoning": "string",
-  "recommended_invoice_json": object | null
+  "recommended_invoice_json": {{
+    "invoice_number": "string",
+    "customer_name": "string",
+    "invoice_date": "string",
+    "due_date": "string",
+    "subtotal_amount": number,
+    "tax_amount": number,
+    "total_amount": number,
+    "outstanding_amount": number,
+    "items": [
+      {{
+        "description": "string",
+        "quantity": number,
+        "unit_price": number,
+        "amount": number
+      }}
+    ]
+  }} | null
 }}
 """
         openrouter_key = settings.OPENROUTER_API_KEY

@@ -166,6 +166,55 @@ class ARServiceClient:
         except Exception as e:
             raise ARServiceClientException(f"AR Service communication error: {str(e)}")
 
+    async def amend_invoice(
+        self,
+        invoice_id: UUID,
+        payload: dict,
+        custom_token: str | None = None,
+    ) -> dict:
+        """Apply an invoice amendment in AR service."""
+        url = f"{self.base_url}/api/v1/invoices/{invoice_id}/amend"
+        headers = self._get_headers(custom_token)
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(
+                    url, headers=headers, json=payload, timeout=30.0
+                )
+                if resp.status_code == 404:
+                    raise ARServiceClientException(
+                        f"Invoice {invoice_id} not found in AR.", status_code=404
+                    )
+                resp.raise_for_status()
+                return resp.json()
+        except httpx.HTTPStatusError as e:
+            raise ARServiceClientException(
+                f"AR Service HTTP error: {e.response.text}",
+                status_code=e.response.status_code,
+            )
+        except ARServiceClientException:
+            raise
+        except Exception as e:
+            raise ARServiceClientException(f"AR Service communication error: {str(e)}")
+
+    async def get_invoice_versions(
+        self, invoice_id: UUID, custom_token: str | None = None
+    ) -> dict:
+        """List version history for an invoice."""
+        url = f"{self.base_url}/api/v1/invoices/{invoice_id}/versions"
+        headers = self._get_headers(custom_token)
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(url, headers=headers, timeout=5.0)
+                resp.raise_for_status()
+                return resp.json()
+        except httpx.HTTPStatusError as e:
+            raise ARServiceClientException(
+                f"AR Service HTTP error: {e.response.text}",
+                status_code=e.response.status_code,
+            )
+        except Exception as e:
+            raise ARServiceClientException(f"AR Service communication error: {str(e)}")
+
     async def find_payment_reference(
         self, reference_number: str, custom_token: str | None = None
     ) -> str:

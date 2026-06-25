@@ -34,7 +34,7 @@ class DisputeSLA(Base):
     )
     status: Mapped[str] = mapped_column(
         String(50), default="ON_TRACK", nullable=False
-    )  # ON_TRACK, AT_RISK, BREACHED
+    )  # ON_TRACK, AT_RISK, BREACHED, CLOSED
 
     # Soft Delete / Data Retention
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)

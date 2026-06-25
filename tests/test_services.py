@@ -111,6 +111,82 @@ async def test_sla_pause_and_resume(db_session: AsyncSession):
 
 
 @pytest.mark.asyncio
+async def test_sla_closed_when_dispute_closed(db_session: AsyncSession):
+    case_repo = CaseRepository(db_session)
+    dispute_repo = DisputeRepository(db_session)
+    sla_repo = SLARepository(db_session)
+    activity_repo = ActivityRepository(db_session)
+
+    audit_service = AuditService(activity_repo)
+    sla_service = SLAService(sla_repo, dispute_repo, audit_service, settings)
+
+    case = await case_repo.create_case(
+        case_number=f"CASE-{uuid4().hex[:6].upper()}",
+        customer_email="customer@example.com",
+    )
+    dispute = await dispute_repo.create_dispute(
+        dispute_number=f"DISP-{uuid4().hex[:6].upper()}",
+        case_id=case.id,
+        invoice_id=uuid4(),
+        invoice_number="INV-9001",
+        customer_id=uuid4(),
+        dispute_category="AMENDMENT",
+        status="OPEN",
+    )
+
+    sla = await sla_service.create_sla(dispute.id)
+    dispute.status = "CLOSED"
+    await dispute_repo.update_dispute(dispute)
+
+    await sla_service.handle_status_change(dispute.id, "OPEN", "CLOSED")
+    await db_session.refresh(sla)
+    assert sla.is_paused is True
+    assert sla.status == "CLOSED"
+
+    updated = await sla_service.calculate_progress(dispute.id)
+    assert updated is not None
+    assert updated.status == "CLOSED"
+
+
+@pytest.mark.asyncio
+async def test_sla_closed_when_dispute_failed(db_session: AsyncSession):
+    case_repo = CaseRepository(db_session)
+    dispute_repo = DisputeRepository(db_session)
+    sla_repo = SLARepository(db_session)
+    activity_repo = ActivityRepository(db_session)
+
+    audit_service = AuditService(activity_repo)
+    sla_service = SLAService(sla_repo, dispute_repo, audit_service, settings)
+
+    case = await case_repo.create_case(
+        case_number=f"CASE-{uuid4().hex[:6].upper()}",
+        customer_email="customer@example.com",
+    )
+    dispute = await dispute_repo.create_dispute(
+        dispute_number=f"DISP-{uuid4().hex[:6].upper()}",
+        case_id=case.id,
+        invoice_id=uuid4(),
+        invoice_number="INV-9002",
+        customer_id=uuid4(),
+        dispute_category="PAYMENT_ALREADY_DONE",
+        status="OPEN",
+    )
+
+    sla = await sla_service.create_sla(dispute.id)
+    dispute.status = "FAILED"
+    await dispute_repo.update_dispute(dispute)
+
+    await sla_service.handle_status_change(dispute.id, "OPEN", "FAILED")
+    await db_session.refresh(sla)
+    assert sla.is_paused is True
+    assert sla.status == "CLOSED"
+
+    updated = await sla_service.calculate_progress(dispute.id)
+    assert updated is not None
+    assert updated.status == "CLOSED"
+
+
+@pytest.mark.asyncio
 async def test_escalation_rules(db_session: AsyncSession, seed_users):
     case_repo = CaseRepository(db_session)
     dispute_repo = DisputeRepository(db_session)
@@ -616,7 +692,7 @@ async def test_sla_stopped_on_closed_dispute(db_session: AsyncSession):
     # Active elapsed should be ~60 mins
     # Percentage should be (60 / 720) * 100 = 8.33%
     assert 8.0 <= sla.current_percentage <= 9.0
-    assert sla.status == "ON_TRACK"
+    assert sla.status == "CLOSED"
 
     # Store percentage at closure
     percentage_at_closure = sla.current_percentage
@@ -628,7 +704,7 @@ async def test_sla_stopped_on_closed_dispute(db_session: AsyncSession):
     await db_session.refresh(sla)
 
     assert sla.current_percentage == percentage_at_closure
-    assert sla.status == "ON_TRACK"
+    assert sla.status == "CLOSED"
 
     # Test reopening: transition to OPEN
     dispute.status = "OPEN"

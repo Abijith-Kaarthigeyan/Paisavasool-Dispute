@@ -38,6 +38,10 @@ from src.data.repositories.recommendation_repository import RecommendationReposi
 from src.data.repositories.review_queue_repository import ReviewQueueRepository
 from src.observability.logging.logger import logger
 
+PAYMENT_DISPUTE_CATEGORIES = frozenset(
+    {"PAYMENT_ALREADY_DONE", "PAYMENT_NOT_REFLECTED"}
+)
+
 # --- HELPERS ---
 
 
@@ -86,6 +90,58 @@ async def _persist_outbound_customer_mail(
         body=agent_res["body"],
         communication_type="CUSTOMER",
     )
+
+
+def _merge_recommended_invoice_json(
+    original: dict[str, Any],
+    recommended: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Merges agent-recommended invoice changes onto the fetched invoice snapshot."""
+    if not recommended:
+        return None
+
+    merged = {**original, **recommended}
+    if recommended.get("items"):
+        merged["items"] = recommended["items"]
+    elif not merged.get("items"):
+        merged["items"] = original.get("items", [])
+    return merged
+
+
+def _build_ar_amend_payload(
+    invoice_json: dict[str, Any],
+    *,
+    dispute_id: UUID,
+    recommendation_id: UUID | None,
+    change_reason: str,
+    created_by: str = "dispute-service",
+) -> dict[str, Any]:
+    """Maps dispute recommendation JSON to AR amend API request body."""
+    items = invoice_json.get("items") or invoice_json.get("invoice_items") or []
+    return {
+        "subtotal_amount": float(invoice_json.get("subtotal_amount", 0)),
+        "tax_amount": float(invoice_json.get("tax_amount", 0)),
+        "total_amount": float(invoice_json.get("total_amount", 0)),
+        "invoice_date": invoice_json.get("invoice_date"),
+        "due_date": invoice_json.get("due_date"),
+        "currency": invoice_json.get("currency"),
+        "items": [
+            {
+                "description": str(
+                    item.get("description") or item.get("product_name") or ""
+                ),
+                "quantity": float(item.get("quantity", 0)),
+                "unit_price": float(item.get("unit_price", 0)),
+                "amount": float(item.get("amount", item.get("line_amount", 0))),
+            }
+            for item in items
+        ],
+        "change_reason": change_reason,
+        "change_source": "DISPUTE_AMENDMENT",
+        "dispute_id": str(dispute_id),
+        "recommendation_id": str(recommendation_id) if recommendation_id else None,
+        "created_by": created_by,
+    }
 
 
 async def _persist_inbound_customer_email(
@@ -939,7 +995,10 @@ async def amendment_resolution_node(
         recommended_action=f"AMENDMENT_DECISION: {outcome}. Reason: {agent_res['reasoning']}",
         confidence=agent_res["confidence"],
         created_by_agent="AmendmentResolutionAgent",
-        recommended_invoice_json=agent_res.get("recommended_invoice_json"),
+        recommended_invoice_json=_merge_recommended_invoice_json(
+            invoice_json,
+            agent_res.get("recommended_invoice_json"),
+        ),
     )
 
     if outcome == "NEED_MORE_INFO":
@@ -1139,22 +1198,17 @@ async def payment_checker_node(
     try:
         inv_status = await ar_client.get_payment_status(dispute.invoice_id)
         if inv_status == "PAID":
-            dispute.resolution_outcome = "CUSTOMER_CORRECT"
-            dispute.status = "RESOLVED"
-            await dispute_repo.update_dispute(dispute)
-
             await audit_service.log_event(
                 dispute_id=dispute_id,
-                action="STATUS_CHANGED",
+                action="PAYMENT_OUTCOME_PROPOSED",
                 metadata={
-                    "old_status": dispute.status,
-                    "new_status": "RESOLVED",
-                    "outcome": "CUSTOMER_CORRECT",
+                    "proposed_outcome": "CUSTOMER_CORRECT",
+                    "reason": "invoice_paid_pending_settlement_confirmation",
                 },
             )
             return {
                 "resolution_outcome": "CUSTOMER_CORRECT",
-                "workflow_status": "RESOLVED",
+                "workflow_status": "WAITING_ASSOCIATE_APPROVAL",
                 "current_node": "payment_checker_node",
             }
     except Exception as e:
@@ -1214,22 +1268,17 @@ async def payment_checker_node(
     # REFERENCE EXISTS: Search payments
     res_status = await ar_client.find_payment_reference(ref_num)
     if res_status == "SETTLED":
-        dispute.resolution_outcome = "CUSTOMER_CORRECT"
-        dispute.status = "RESOLVED"
-        await dispute_repo.update_dispute(dispute)
-
         await audit_service.log_event(
             dispute_id=dispute_id,
-            action="STATUS_CHANGED",
+            action="PAYMENT_OUTCOME_PROPOSED",
             metadata={
-                "old_status": dispute.status,
-                "new_status": "RESOLVED",
-                "outcome": "CUSTOMER_CORRECT",
+                "proposed_outcome": "CUSTOMER_CORRECT",
+                "reason": "payment_settled_pending_settlement_confirmation",
             },
         )
         return {
             "resolution_outcome": "CUSTOMER_CORRECT",
-            "workflow_status": "RESOLVED",
+            "workflow_status": "WAITING_ASSOCIATE_APPROVAL",
             "current_node": "payment_checker_node",
         }
     elif res_status == "REJECTED":
@@ -1311,6 +1360,106 @@ async def department_contact_node(
         "resolution_outcome": "PENDING_INTERNAL_REVIEW",
         "workflow_status": "WAITING_INTERNAL_TEAM",
         "current_node": "department_contact_node",
+    }
+
+
+async def apply_amendment_node(
+    state: DisputeWorkflowState, config: RunnableConfig
+) -> dict[str, Any]:
+    """Applies approved invoice amendment to AR service before customer notification."""
+    logger.info("[Node Start] apply_amendment_node")
+    db = config["configurable"]["db"]
+    dispute_id = state["dispute_id"]
+
+    dispute_repo = DisputeRepository(db)
+    dispute = await dispute_repo.get_by_id(dispute_id)
+    if not dispute:
+        return {}
+
+    category = state.get("dispute_category") or dispute.dispute_category
+    outcome = state.get("resolution_outcome") or dispute.resolution_outcome
+    approved_amendment = outcome in (
+        "CUSTOMER_CORRECT",
+        "APPROVE",
+        "EDIT_AND_APPLY",
+    )
+    if category != "AMENDMENT" or not approved_amendment:
+        logger.info("[Node Skip] apply_amendment_node - not an approved amendment")
+        return {"current_node": "apply_amendment_node"}
+
+    activity_repo = ActivityRepository(db)
+    audit_service = AuditService(activity_repo)
+    rec_repo = RecommendationRepository(db)
+    rec_service = RecommendationService(rec_repo, audit_service)
+
+    amended_json = (state.get("metadata") or {}).get("amended_invoice_json")
+    rec = await rec_repo.get_latest_recommendation(dispute_id)
+    if not rec or not rec.recommended_invoice_json:
+        if amended_json:
+            rec = await rec_service.persist_recommendation(
+                dispute_id=dispute_id,
+                recommended_action="ASSOCIATE_EDIT_AND_APPLY",
+                confidence=100.0,
+                created_by_agent="ASSOCIATE",
+                recommended_invoice_json=amended_json,
+            )
+        else:
+            logger.error("No amendment recommendation found for dispute %s", dispute_id)
+            await audit_service.log_event(
+                dispute_id=dispute_id,
+                action="AMENDMENT_APPLY_FAILED",
+                metadata={"error": "No recommended_invoice_json available"},
+            )
+            return {
+                "errors": (state.get("errors") or [])
+                + ["Amendment apply failed: no recommendation payload"],
+                "current_node": "apply_amendment_node",
+            }
+
+    recommendation_id = rec.id
+    invoice_json = rec.recommended_invoice_json or amended_json
+    change_reason = rec.recommended_action or "Dispute amendment approved"
+
+    ar_payload = _build_ar_amend_payload(
+        invoice_json,
+        dispute_id=dispute_id,
+        recommendation_id=recommendation_id,
+        change_reason=change_reason,
+    )
+
+    ar_client = ARServiceClient()
+    try:
+        amend_result = await ar_client.amend_invoice(dispute.invoice_id, ar_payload)
+    except Exception as e:
+        logger.error("Failed to apply invoice amendment in AR: %s", str(e))
+        await audit_service.log_event(
+            dispute_id=dispute_id,
+            action="AMENDMENT_APPLY_FAILED",
+            metadata={"error": str(e)},
+        )
+        return {
+            "errors": (state.get("errors") or []) + [f"Amendment apply failed: {e}"],
+            "current_node": "apply_amendment_node",
+        }
+
+    await audit_service.log_event(
+        dispute_id=dispute_id,
+        action="AMENDMENT_APPLIED",
+        metadata={
+            "invoice_version": amend_result.get("version"),
+            "invoice_status": amend_result.get("status"),
+            "outstanding_amount": amend_result.get("outstanding_amount"),
+            "credit_amount": amend_result.get("credit_amount"),
+        },
+    )
+
+    return {
+        "workflow_status": "AMENDMENT_APPLIED",
+        "current_node": "apply_amendment_node",
+        "metadata": {
+            **(state.get("metadata") or {}),
+            "amendment_result": amend_result,
+        },
     }
 
 
@@ -1439,9 +1588,11 @@ async def waiting_approval_node(
     activity_repo = ActivityRepository(db)
     audit_service = AuditService(activity_repo)
 
-    if outcome in ["APPROVE", "REJECT"]:
+    if outcome in ["APPROVE", "EDIT_AND_APPLY", "REJECT"]:
         final_outcome = (
-            "CUSTOMER_CORRECT" if outcome == "APPROVE" else "COMPANY_CORRECT"
+            "CUSTOMER_CORRECT"
+            if outcome in ["APPROVE", "EDIT_AND_APPLY"]
+            else "COMPANY_CORRECT"
         )
 
         old_status = dispute.status
@@ -1456,13 +1607,22 @@ async def waiting_approval_node(
                 "old_status": old_status,
                 "new_status": "RESOLVED",
                 "outcome": final_outcome,
+                "associate_decision": outcome,
             },
         )
-        return {
+        result: dict[str, Any] = {
             "resolution_outcome": final_outcome,
+            "dispute_category": dispute.dispute_category,
             "workflow_status": "RESOLVED",
             "current_node": "waiting_approval_node",
         }
+        amended = state.get("metadata", {}).get("amended_invoice_json")
+        if amended:
+            result["metadata"] = {
+                **(state.get("metadata") or {}),
+                "amended_invoice_json": amended,
+            }
+        return result
 
     # First entry: Update dispute status
     old_status = dispute.status
@@ -1475,6 +1635,15 @@ async def waiting_approval_node(
         action="STATUS_CHANGED",
         metadata={"old_status": old_status, "new_status": "WAITING_ASSOCIATE_APPROVAL"},
     )
+
+    category = state.get("dispute_category") or dispute.dispute_category
+    if category in PAYMENT_DISPUTE_CATEGORIES:
+        logger.info(
+            "[Interrupt raised] waiting_approval_node (settlement confirmation)"
+        )
+        raise NodeInterrupt(
+            "Workflow paused: Waiting for associate to confirm settlement."
+        )
 
     logger.info("[Interrupt raised] waiting_approval_node")
     raise NodeInterrupt("Workflow paused: Waiting for Associate Approval decision.")
@@ -1602,6 +1771,20 @@ def route_collections_destination(state: DisputeWorkflowState) -> str:
         return "department_contact_node"
 
 
+def route_after_waiting_approval(state: DisputeWorkflowState) -> str:
+    """Routes after associate approval: apply amendment or proceed to mail."""
+    category = state.get("dispute_category")
+    outcome = state.get("resolution_outcome")
+    approved_amendment = outcome in (
+        "CUSTOMER_CORRECT",
+        "APPROVE",
+        "EDIT_AND_APPLY",
+    )
+    if category == "AMENDMENT" and approved_amendment:
+        return "apply_amendment_node"
+    return "mail_agent_node"
+
+
 def route_after_amendment_resolution(state: DisputeWorkflowState) -> str:
     """Routes after amendment resolution agent."""
     outcome = state.get("resolution_outcome")
@@ -1615,9 +1798,11 @@ def route_after_amendment_resolution(state: DisputeWorkflowState) -> str:
 def route_after_payment_checker(state: DisputeWorkflowState) -> str:
     """Routes after payment checker node."""
     outcome = state.get("resolution_outcome")
-    if outcome in ["CUSTOMER_CORRECT", "COMPANY_CORRECT"]:
+    if outcome == "CUSTOMER_CORRECT":
+        return "waiting_approval_node"
+    if outcome == "COMPANY_CORRECT":
         return "mail_agent_node"
-    elif outcome == "PENDING_INTERNAL_REVIEW":
+    if outcome == "PENDING_INTERNAL_REVIEW":
         return "waiting_resolution_node"
     return END
 
@@ -1669,6 +1854,7 @@ def create_graph() -> StateGraph:
     workflow.add_node("payment_checker_node", payment_checker_node)
     workflow.add_node("department_contact_node", department_contact_node)
     workflow.add_node("waiting_approval_node", waiting_approval_node)
+    workflow.add_node("apply_amendment_node", apply_amendment_node)
     workflow.add_node("waiting_resolution_node", waiting_resolution_node)
     workflow.add_node("mail_agent_node", mail_agent_node)
     workflow.add_node("close_dispute_node", close_dispute_node)
@@ -1748,7 +1934,15 @@ def create_graph() -> StateGraph:
             END: END,
         },
     )
-    workflow.add_edge("waiting_approval_node", "mail_agent_node")
+    workflow.add_conditional_edges(
+        "waiting_approval_node",
+        route_after_waiting_approval,
+        {
+            "apply_amendment_node": "apply_amendment_node",
+            "mail_agent_node": "mail_agent_node",
+        },
+    )
+    workflow.add_edge("apply_amendment_node", "mail_agent_node")
 
     # Payment Path
     workflow.add_edge("reference_extraction_node", "payment_checker_node")

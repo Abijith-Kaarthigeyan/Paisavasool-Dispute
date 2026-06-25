@@ -33,8 +33,8 @@ class DisputeMailAgent:
             body = (
                 "Dear Customer,\n\n"
                 "We have completed the review of your dispute. Your concern has been validated, "
-                "and we have approved the proposed resolution. The necessary adjustments will be applied "
-                "to your invoice shortly.\n\n"
+                "and we have approved the proposed resolution. The necessary adjustments have been "
+                "applied to your invoice.\n\n"
                 "Thank you for your patience and for bringing this to our attention.\n\n"
                 "Best regards,\n"
                 "Paisa Vasool Customer Support Team"

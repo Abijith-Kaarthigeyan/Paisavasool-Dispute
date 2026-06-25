@@ -16,6 +16,8 @@ from src.api.dependencies import (
     get_workflow_context_repository,
 )
 from src.core.security.dependencies import require_finance
+from src.core.services.audit_service import AuditService
+from src.core.services.recommendation_service import RecommendationService
 from src.core.workflow.interrupt_service import WorkflowInterruptService
 from src.core.workflow.resume_service import DisputeResumeService
 from src.data.clients.postgres_client import get_async_db
@@ -24,6 +26,7 @@ from src.data.repositories.other_repositories import (
     ActivityRepository,
     CommentRepository,
 )
+from src.data.repositories.recommendation_repository import RecommendationRepository
 from src.schemas.auth import TokenPayload
 from src.schemas.dispute import (
     DisputeActivityResponse,
@@ -110,6 +113,7 @@ async def create_dispute_comment(
 class DecisionRequest(BaseModel):
     decision: str
     comments: str | None = None
+    amended_invoice_json: dict | None = None
 
 
 @router.post("/{id}/interrupt")
@@ -201,15 +205,35 @@ async def submit_associate_decision(
     resume_service: DisputeResumeService = Depends(get_resume_service),
     db: AsyncSession = Depends(get_async_db),
 ):
-    """Submits Associate Approval (APPROVE/REJECT) and resumes the workflow."""
-    if payload.decision.upper() not in ["APPROVE", "REJECT"]:
+    """Submits Associate Approval (APPROVE/REJECT/EDIT_AND_APPLY) and resumes the workflow."""
+    decision = payload.decision.upper()
+    if decision not in ["APPROVE", "REJECT", "EDIT_AND_APPLY"]:
         raise HTTPException(
-            status_code=400, detail="Invalid decision. Must be APPROVE or REJECT."
+            status_code=400,
+            detail="Invalid decision. Must be APPROVE, REJECT, or EDIT_AND_APPLY.",
+        )
+    if decision == "EDIT_AND_APPLY" and not payload.amended_invoice_json:
+        raise HTTPException(
+            status_code=400,
+            detail="amended_invoice_json is required for EDIT_AND_APPLY.",
         )
 
     dispute = await dispute_repo.get_by_id(id)
     if not dispute:
         raise HTTPException(status_code=404, detail="Dispute not found.")
+
+    if decision == "EDIT_AND_APPLY":
+        activity_repo = ActivityRepository(db)
+        audit_service = AuditService(activity_repo)
+        rec_repo = RecommendationRepository(db)
+        rec_service = RecommendationService(rec_repo, audit_service)
+        await rec_service.persist_recommendation(
+            dispute_id=id,
+            recommended_action=f"ASSOCIATE_EDIT_AND_APPLY: {payload.comments or ''}",
+            confidence=100.0,
+            created_by_agent="ASSOCIATE",
+            recommended_invoice_json=payload.amended_invoice_json,
+        )
 
     # 1. Persist decision
     comment_text = (
@@ -233,11 +257,15 @@ async def submit_associate_decision(
     await db.commit()
 
     # 2. Resume workflow from approval node
-    state_updates = {
-        "resolution_outcome": payload.decision,
+    state_updates: dict = {
+        "resolution_outcome": decision,
         "requires_human_review": False,
         "review_reason": None,
     }
+    if decision == "EDIT_AND_APPLY" and payload.amended_invoice_json:
+        state_updates["metadata"] = {
+            "amended_invoice_json": payload.amended_invoice_json,
+        }
     with contextlib.suppress(Exception):
         await resume_service.resume_workflow(
             db=db,

@@ -293,7 +293,11 @@ async def test_payment_checker_paid_invoice(db_session: AsyncSession):
         state = {"dispute_id": dispute.id, "metadata": {}}
         res = await payment_checker_node(state, config)
         assert res["resolution_outcome"] == "CUSTOMER_CORRECT"
-        assert res["workflow_status"] == "RESOLVED"
+        assert res["workflow_status"] == "WAITING_ASSOCIATE_APPROVAL"
+
+        await db_session.refresh(dispute)
+        assert dispute.status != "RESOLVED"
+        assert dispute.resolution_outcome is None
 
 
 @pytest.mark.asyncio
@@ -344,6 +348,72 @@ async def test_payment_checker_missing_reference(db_session: AsyncSession):
         assert len(customer_comms) == 1
         assert "UTR" in customer_comms[0].body
         assert "INV-NOREF-TEST" in customer_comms[0].body
+
+
+@pytest.mark.asyncio
+async def test_payment_checker_settled_requires_confirmation(db_session: AsyncSession):
+    """SETTLED payment reference proposes CUSTOMER_CORRECT but requires associate confirmation."""
+    case_repo = CaseRepository(db_session)
+    dispute_repo = DisputeRepository(db_session)
+
+    case = await case_repo.create_case(
+        case_number="CASE-2026-999013", customer_email="customer@test.com"
+    )
+    dispute = await dispute_repo.create_dispute(
+        dispute_number="DISP-2026-999013",
+        case_id=case.id,
+        invoice_id=uuid4(),
+        invoice_number="INV-SETTLED-TEST",
+        customer_id=uuid4(),
+        dispute_category="PAYMENT_NOT_REFLECTED",
+    )
+    await db_session.commit()
+
+    config = {
+        "configurable": {
+            "db": db_session,
+            "thread_id": str(dispute.id),
+        }
+    }
+
+    with (
+        patch(
+            "src.data.clients.ar_service_client.ARServiceClient.get_payment_status",
+            new_callable=AsyncMock,
+            return_value="UNPAID",
+        ),
+        patch(
+            "src.data.clients.ar_service_client.ARServiceClient.find_payment_reference",
+            new_callable=AsyncMock,
+            return_value="SETTLED",
+        ),
+    ):
+        from src.core.workflow.graph import payment_checker_node
+
+        state = {
+            "dispute_id": dispute.id,
+            "metadata": {"extracted_reference_number": "UTR123456"},
+        }
+        res = await payment_checker_node(state, config)
+        assert res["resolution_outcome"] == "CUSTOMER_CORRECT"
+        assert res["workflow_status"] == "WAITING_ASSOCIATE_APPROVAL"
+
+        await db_session.refresh(dispute)
+        assert dispute.status != "RESOLVED"
+        assert dispute.resolution_outcome is None
+
+
+def test_route_after_payment_checker_customer_correct_goes_to_approval():
+    from src.core.workflow.graph import route_after_payment_checker
+
+    assert (
+        route_after_payment_checker({"resolution_outcome": "CUSTOMER_CORRECT"})
+        == "waiting_approval_node"
+    )
+    assert (
+        route_after_payment_checker({"resolution_outcome": "COMPANY_CORRECT"})
+        == "mail_agent_node"
+    )
 
 
 # --- 5. END-TO-END WORFLOW ROUTING, RESUMPTION, & APPROVAL TESTS ---
@@ -428,12 +498,33 @@ async def test_e2e_amendment_path(db_session: AsyncSession, seed_users):
     )
     mock_ar.pause_collections = AsyncMock(return_value={})
     mock_ar.resume_collections = AsyncMock(return_value={})
+    mock_ar.amend_invoice = AsyncMock(
+        return_value={
+            "invoice_id": str(invoice_id),
+            "version": 2,
+            "status": "PAID",
+            "outstanding_amount": 0,
+            "credit_amount": 0,
+        }
+    )
 
     mock_amend_outcome = {
         "resolution_outcome": "CUSTOMER_CORRECT",
         "confidence": 99.0,
         "reasoning": "Customer correctly identified quantity error",
-        "recommended_invoice_json": {"total_amount": 59},
+        "recommended_invoice_json": {
+            "subtotal_amount": 50,
+            "tax_amount": 9,
+            "total_amount": 59,
+            "items": [
+                {
+                    "description": "Widget",
+                    "quantity": 1,
+                    "unit_price": 50,
+                    "amount": 50,
+                }
+            ],
+        },
         "agent_run_details": None,
     }
 
@@ -483,6 +574,7 @@ async def test_e2e_amendment_path(db_session: AsyncSession, seed_users):
                 assert dispute.status == "CLOSED"
                 assert dispute.resolution_outcome == "CUSTOMER_CORRECT"
                 assert dispute.closed_at is not None
+                mock_ar.amend_invoice.assert_called_once()
 
                 # Verify communication was persisted
                 comm_repo = CommunicationRepository(db_session)

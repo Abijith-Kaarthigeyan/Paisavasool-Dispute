@@ -118,8 +118,18 @@ async def handle_task_failure_async(
             return
 
         # 1. Update dispute status to FAILED
+        old_status = dispute.status
         dispute.status = "FAILED"
         await dispute_repo.update_dispute(dispute)
+
+        from src.core.config.settings import settings
+        from src.core.services.sla_service import SLAService
+        from src.data.repositories.sla_repository import SLARepository
+
+        sla_service = SLAService(
+            SLARepository(db), dispute_repo, audit_service, settings
+        )
+        await sla_service.handle_status_change(dispute_id, old_status, "FAILED")
 
         # 2. Add item to dispute_review_queue
         await review_repo.create_review_queue_item(

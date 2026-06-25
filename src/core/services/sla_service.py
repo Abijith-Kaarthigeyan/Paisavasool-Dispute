@@ -9,6 +9,8 @@ from src.data.repositories.dispute_repository import DisputeRepository
 from src.data.repositories.sla_repository import SLARepository
 from src.observability.logging.logger import logger
 
+TERMINAL_DISPUTE_STATUSES = frozenset({"CLOSED", "RESOLVED", "FAILED"})
+
 
 class SLAService:
     def __init__(
@@ -77,20 +79,23 @@ class SLAService:
 
         now = datetime.now(UTC)
 
-        # Transitioning TO CLOSED/RESOLVED: Stop SLA (Pause it permanently)
-        if new_status in ["CLOSED", "RESOLVED"] and not sla.is_paused:
+        # Transitioning TO terminal status: stop SLA permanently
+        if new_status in TERMINAL_DISPUTE_STATUSES:
             sla.is_paused = True
-            sla.paused_at = now
+            sla.paused_at = sla.paused_at or now
+            sla.status = "CLOSED"
             await self.sla_repo.update_sla(sla)
 
             await self.audit_service.log_event(
                 dispute_id=dispute_id,
                 action="SLA_PAUSED",
                 metadata={
-                    "paused_at": now.isoformat(),
+                    "paused_at": (sla.paused_at or now).isoformat(),
                     "reason": f"DISPUTE_{new_status}",
+                    "sla_status": "CLOSED",
                 },
             )
+            return
 
         # Transitioning TO WAITING_CUSTOMER: Pause SLA
         elif new_status == "WAITING_CUSTOMER" and not sla.is_paused:
@@ -104,10 +109,10 @@ class SLAService:
                 metadata={"paused_at": now.isoformat()},
             )
 
-        # Transitioning AWAY from WAITING_CUSTOMER or CLOSED/RESOLVED: Resume SLA
+        # Transitioning AWAY from WAITING_CUSTOMER or terminal status: Resume SLA
         elif (
-            old_status in ["WAITING_CUSTOMER", "CLOSED", "RESOLVED"]
-            and new_status not in ["WAITING_CUSTOMER", "CLOSED", "RESOLVED"]
+            old_status in ["WAITING_CUSTOMER", *TERMINAL_DISPUTE_STATUSES]
+            and new_status not in ["WAITING_CUSTOMER", *TERMINAL_DISPUTE_STATUSES]
             and sla.is_paused
         ):
             paused_at = (sla.paused_at or sla.started_at).replace(tzinfo=UTC)
@@ -145,22 +150,16 @@ class SLAService:
 
         now = datetime.now(UTC)
 
-        # If the dispute is CLOSED or RESOLVED, freeze/stop the SLA
-        if dispute.status in ["CLOSED", "RESOLVED"] and not sla.is_paused:
-            sla.is_paused = True
-            sla.paused_at = dispute.closed_at or dispute.resolved_at or now
-            if sla.paused_at.tzinfo is None:
+        # Terminal disputes keep SLA frozen with CLOSED status
+        if dispute.status in TERMINAL_DISPUTE_STATUSES:
+            if not sla.is_paused:
+                sla.is_paused = True
+                sla.paused_at = dispute.closed_at or dispute.resolved_at or now
+            if sla.paused_at and sla.paused_at.tzinfo is None:
                 sla.paused_at = sla.paused_at.replace(tzinfo=UTC)
+            sla.status = "CLOSED"
             await self.sla_repo.update_sla(sla)
-
-            await self.audit_service.log_event(
-                dispute_id=dispute_id,
-                action="SLA_PAUSED",
-                metadata={
-                    "paused_at": sla.paused_at.isoformat(),
-                    "reason": f"DISPUTE_{dispute.status}",
-                },
-            )
+            return sla
 
         started_at = sla.started_at.replace(tzinfo=UTC)
 
