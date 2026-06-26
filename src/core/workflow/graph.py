@@ -301,6 +301,9 @@ async def case_intake_node(
         email_subject=state.get("email_subject"),
         email_body=state.get("email_body"),
         original_message_id=message_id,
+        gmail_thread_id=state.get("gmail_thread_id"),
+        rfc_message_id=state.get("rfc_message_id"),
+        raw_content=state.get("raw_content"),
     )
     logger.info("[Node End] case_intake_node - Created case: %s", case.case_number)
     return {
@@ -360,6 +363,7 @@ async def pre_correlation_node(
     dispute_repo = DisputeRepository(db)
     comm_repo = CommunicationRepository(db)
     comment_repo = CommentRepository(db)
+    case_repo = CaseRepository(db)
     activity_repo = ActivityRepository(db)
     audit_service = AuditService(activity_repo)
 
@@ -368,6 +372,7 @@ async def pre_correlation_node(
         communication_repo=comm_repo,
         comment_repo=comment_repo,
         audit_service=audit_service,
+        case_repo=case_repo,
     )
 
     matched_id = await correlation_service.find_correlated_dispute_for_intake(
@@ -376,6 +381,9 @@ async def pre_correlation_node(
         email_subject=state.get("email_subject") or "",
         email_body=state.get("email_body") or "",
         raw_content=state.get("raw_content") or "",
+        gmail_thread_id=state.get("gmail_thread_id"),
+        in_reply_to=state.get("in_reply_to"),
+        email_references=state.get("email_references"),
     )
 
     if matched_id:

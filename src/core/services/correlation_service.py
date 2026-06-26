@@ -2,7 +2,9 @@ import re
 from uuid import UUID
 
 from src.core.services.audit_service import AuditService
+from src.core.services.email_thread_utils import extract_reference_tokens
 from src.core.workflow.triage_agent import DisputeTriageAgent
+from src.data.repositories.case_repository import CaseRepository
 from src.data.repositories.communication_repository import CommunicationRepository
 from src.data.repositories.dispute_repository import DisputeRepository
 from src.data.repositories.other_repositories import CommentRepository
@@ -42,11 +44,13 @@ class CorrelationService:
         communication_repo: CommunicationRepository,
         comment_repo: CommentRepository,
         audit_service: AuditService,
+        case_repo: CaseRepository | None = None,
     ):
         self.dispute_repo = dispute_repo
         self.communication_repo = communication_repo
         self.comment_repo = comment_repo
         self.audit_service = audit_service
+        self.case_repo = case_repo
 
     def collapse_category(self, category: str) -> str:
         """Collapses granular dispute categories into AMENDMENT or leaves them independent."""
@@ -238,6 +242,128 @@ class CorrelationService:
             metadata={"comment_id": str(comm.id), "source": "correlation"},
         )
 
+    def _active_disputes_for_case(self, case, customer_email: str) -> list:
+        normalized_email = (customer_email or "").strip().lower()
+        case_email = (case.customer_email or "").strip().lower()
+        if normalized_email and case_email and normalized_email != case_email:
+            return []
+
+        active = [
+            dispute
+            for dispute in case.disputes or []
+            if not dispute.is_deleted and dispute.status in self.ACTIVE_STATUSES
+        ]
+        active.sort(key=lambda dispute: dispute.updated_at, reverse=True)
+        return active
+
+    def _pick_dispute_from_cases(
+        self,
+        cases: list,
+        inferred_categories: list[str],
+        customer_email: str,
+    ):
+        candidates: list = []
+        for case in cases:
+            candidates.extend(self._active_disputes_for_case(case, customer_email))
+        if not candidates:
+            return None
+
+        for category in inferred_categories:
+            matched = self._select_best_match(candidates, category)
+            if matched:
+                return matched
+
+        waiting = [
+            dispute for dispute in candidates if dispute.status == "WAITING_CUSTOMER"
+        ]
+        if len(waiting) == 1:
+            return waiting[0]
+        if len(candidates) == 1:
+            return candidates[0]
+        return None
+
+    async def _find_dispute_by_communication_tokens(self, tokens: list[str]):
+        if not tokens:
+            return None
+
+        for token in tokens:
+            communications = await self.communication_repo.find_by_message_token(token)
+            for communication in communications:
+                dispute = await self.dispute_repo.get_by_id(communication.dispute_id)
+                if dispute and dispute.status in self.ACTIVE_STATUSES:
+                    return dispute
+        return None
+
+    async def _correlate_by_email_thread(
+        self,
+        *,
+        gmail_thread_id: str | None,
+        in_reply_to: str | None,
+        email_references: str | None,
+        customer_email: str,
+        email_subject: str,
+        email_body: str,
+        raw_content: str | None,
+        inferred_categories: list[str],
+    ) -> UUID | None:
+        if not self.case_repo:
+            return None
+
+        if gmail_thread_id:
+            cases = await self.case_repo.find_by_gmail_thread_id(gmail_thread_id)
+            matched_dispute = self._pick_dispute_from_cases(
+                cases, inferred_categories, customer_email
+            )
+            if matched_dispute:
+                await self._attach_inbound_communication(
+                    matched_dispute=matched_dispute,
+                    customer_email=customer_email,
+                    email_subject=email_subject,
+                    email_body=email_body,
+                    raw_content=raw_content,
+                )
+                await self._reopen_if_waiting_customer(matched_dispute)
+                return matched_dispute.id
+
+        reference_tokens = extract_reference_tokens(in_reply_to, email_references)
+        for token in reference_tokens:
+            case = await self.case_repo.find_by_message_token(token)
+            if case:
+                matched_dispute = self._pick_dispute_from_cases(
+                    [case], inferred_categories, customer_email
+                )
+                if matched_dispute:
+                    await self._attach_inbound_communication(
+                        matched_dispute=matched_dispute,
+                        customer_email=customer_email,
+                        email_subject=email_subject,
+                        email_body=email_body,
+                        raw_content=raw_content,
+                    )
+                    await self._reopen_if_waiting_customer(matched_dispute)
+                    return matched_dispute.id
+
+        matched_dispute = await self._find_dispute_by_communication_tokens(
+            reference_tokens
+        )
+        if matched_dispute:
+            if customer_email and matched_dispute.case:
+                case_email = (matched_dispute.case.customer_email or "").strip().lower()
+                sender_email = customer_email.strip().lower()
+                if case_email and sender_email != case_email:
+                    return None
+            await self._attach_inbound_communication(
+                matched_dispute=matched_dispute,
+                customer_email=customer_email,
+                email_subject=email_subject,
+                email_body=email_body,
+                raw_content=raw_content,
+            )
+            await self._reopen_if_waiting_customer(matched_dispute)
+            return matched_dispute.id
+
+        return None
+
     async def correlate_dispute(
         self,
         *,
@@ -286,6 +412,9 @@ class CorrelationService:
         email_subject: str,
         email_body: str,
         raw_content: str | None = None,
+        gmail_thread_id: str | None = None,
+        in_reply_to: str | None = None,
+        email_references: str | None = None,
     ) -> UUID | None:
         """Correlates an incoming case email before new disputes are generated."""
         content = raw_content or f"{email_subject}\n{email_body}"
@@ -293,6 +422,19 @@ class CorrelationService:
             self._infer_categories_from_content(content),
             content,
         )
+
+        thread_match = await self._correlate_by_email_thread(
+            gmail_thread_id=gmail_thread_id,
+            in_reply_to=in_reply_to,
+            email_references=email_references,
+            customer_email=customer_email,
+            email_subject=email_subject,
+            email_body=email_body,
+            raw_content=raw_content,
+            inferred_categories=inferred_categories,
+        )
+        if thread_match:
+            return thread_match
 
         dispute_number = self._extract_dispute_number(content)
         if dispute_number:

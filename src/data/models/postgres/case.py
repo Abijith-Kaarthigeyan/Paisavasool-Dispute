@@ -18,6 +18,10 @@ class DisputeCase(Base):
     email_subject: Mapped[str | None] = mapped_column(String(255), nullable=True)
     email_body: Mapped[str | None] = mapped_column(Text, nullable=True)
     original_message_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    gmail_thread_id: Mapped[str | None] = mapped_column(
+        String(255), nullable=True, index=True
+    )
+    rfc_message_id: Mapped[str | None] = mapped_column(String(512), nullable=True)
     raw_content: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(50), default="OPEN", nullable=False)
 

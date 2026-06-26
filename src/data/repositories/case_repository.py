@@ -4,6 +4,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from src.core.services.email_thread_utils import normalize_message_token
 from src.data.models.postgres.case import DisputeCase
 
 
@@ -49,6 +50,8 @@ class CaseRepository:
         email_subject: str | None = None,
         email_body: str | None = None,
         original_message_id: str | None = None,
+        gmail_thread_id: str | None = None,
+        rfc_message_id: str | None = None,
         raw_content: str | None = None,
         status: str = "OPEN",
     ) -> DisputeCase:
@@ -58,6 +61,8 @@ class CaseRepository:
             email_subject=email_subject,
             email_body=email_body,
             original_message_id=original_message_id,
+            gmail_thread_id=gmail_thread_id,
+            rfc_message_id=rfc_message_id,
             raw_content=raw_content,
             status=status,
         )
@@ -70,3 +75,35 @@ class CaseRepository:
         if not self.db.sync_session._flushing:
             await self.db.flush()
         return case
+
+    async def find_by_gmail_thread_id(self, gmail_thread_id: str) -> list[DisputeCase]:
+        if not gmail_thread_id:
+            return []
+        result = await self.db.execute(
+            select(DisputeCase)
+            .options(selectinload(DisputeCase.disputes))
+            .where(
+                DisputeCase.gmail_thread_id == gmail_thread_id,
+                DisputeCase.is_deleted.is_(False),
+            )
+            .order_by(DisputeCase.updated_at.desc())
+        )
+        return list(result.scalars().all())
+
+    async def find_by_message_token(self, token: str) -> DisputeCase | None:
+        normalized = normalize_message_token(token)
+        if not normalized:
+            return None
+
+        result = await self.db.execute(
+            select(DisputeCase)
+            .options(selectinload(DisputeCase.disputes))
+            .where(DisputeCase.is_deleted.is_(False))
+            .order_by(DisputeCase.updated_at.desc())
+        )
+        for case in result.scalars().all():
+            if normalize_message_token(case.original_message_id) == normalized:
+                return case
+            if normalize_message_token(case.rfc_message_id) == normalized:
+                return case
+        return None

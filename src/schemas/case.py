@@ -26,6 +26,9 @@ class CaseIntakeRequest(BaseModel):
     email_subject: str | None = None
     email_body: str | None = None
     message_id: str | None = None
+    gmail_thread_id: str | None = None
+    rfc_message_id: str | None = None
+    in_reply_to: str | None = None
     references: str | None = None
     raw_content: str | None = None
     received_at: str | None = None

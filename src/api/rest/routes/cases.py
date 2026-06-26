@@ -101,12 +101,18 @@ async def create_case_intake(
         email_subject=payload.email_subject,
         email_body=payload.email_body,
         original_message_id=message_id,
+        gmail_thread_id=payload.gmail_thread_id,
+        rfc_message_id=payload.rfc_message_id,
         raw_content=payload.raw_content,
     )
     await db.commit()
 
     # 3. Queue Celery process_dispute_case workflow task
-    process_dispute_case.delay(str(case.id))
+    process_dispute_case.delay(
+        str(case.id),
+        in_reply_to=payload.in_reply_to or "",
+        email_references=payload.references or "",
+    )
 
     return {
         "case_id": case.id,

@@ -171,7 +171,11 @@ def run_sla_monitoring(self: Task) -> int:
         raise e
 
 
-async def process_dispute_case_async(case_id_str: str) -> None:
+async def process_dispute_case_async(
+    case_id_str: str,
+    in_reply_to: str = "",
+    email_references: str = "",
+) -> None:
     """Runs Case Intake and TriageAgent nodes, then spawns workflows for each generated dispute."""
     from src.core.workflow.graph import get_graph
     from src.data.clients.postgres_client import AsyncSessionLocal
@@ -197,6 +201,10 @@ async def process_dispute_case_async(case_id_str: str) -> None:
             "email_body": case.email_body or "",
             "raw_content": case.raw_content or "",
             "message_id": case.original_message_id,
+            "gmail_thread_id": case.gmail_thread_id,
+            "rfc_message_id": case.rfc_message_id,
+            "in_reply_to": in_reply_to or None,
+            "email_references": email_references or None,
             "workflow_status": "START",
             "current_node": "START",
             "requires_human_review": False,
@@ -227,10 +235,14 @@ async def process_dispute_case_async(case_id_str: str) -> None:
     max_retries=2,
     queue="dispute_processing",
 )
-def process_dispute_case(self: Task, case_id_str: str) -> str:
+def process_dispute_case(
+    self: Task, case_id_str: str, in_reply_to: str = "", email_references: str = ""
+) -> str:
     """Celery task running the case intake and triage graph steps, producing disputes."""
     try:
-        _run_async(process_dispute_case_async(case_id_str))
+        _run_async(
+            process_dispute_case_async(case_id_str, in_reply_to, email_references)
+        )
         return "SUCCESS"
     except Exception as e:
         retry_count = self.request.retries

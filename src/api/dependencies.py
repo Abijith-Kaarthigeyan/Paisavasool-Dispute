@@ -147,10 +147,15 @@ def get_correlation_service(
     dispute_repo: DisputeRepository = Depends(get_dispute_repository),
     communication_repo: CommunicationRepository = Depends(get_communication_repository),
     comment_repo: CommentRepository = Depends(get_comment_repository),
+    case_repo: CaseRepository = Depends(get_case_repository),
     audit_service: AuditService = Depends(get_audit_service),
 ) -> CorrelationService:
     return CorrelationService(
-        dispute_repo, communication_repo, comment_repo, audit_service
+        dispute_repo,
+        communication_repo,
+        comment_repo,
+        audit_service,
+        case_repo,
     )
 
 

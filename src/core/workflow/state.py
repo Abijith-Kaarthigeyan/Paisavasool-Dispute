@@ -15,7 +15,10 @@ class DisputeWorkflowState(TypedDict):
     customer_id: UUID | None
     customer_email: str | None
     message_id: str | None
-    thread_id: str | None
+    gmail_thread_id: str | None
+    rfc_message_id: str | None
+    in_reply_to: str | None
+    email_references: str | None
     email_subject: str | None
     email_body: str | None
     raw_content: str | None

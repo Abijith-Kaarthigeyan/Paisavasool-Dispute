@@ -451,6 +451,58 @@ async def test_correlation_intake_by_customer_email_waiting_customer(
 
 
 @pytest.mark.asyncio
+async def test_correlation_intake_by_gmail_thread_without_invoice_number(
+    db_session: AsyncSession,
+):
+    """Reply in the same Gmail thread resumes the dispute without invoice/dispute references."""
+    case_repo = CaseRepository(db_session)
+    dispute_repo = DisputeRepository(db_session)
+    comm_repo = CommunicationRepository(db_session)
+    comment_repo = CommentRepository(db_session)
+    activity_repo = ActivityRepository(db_session)
+
+    audit_service = AuditService(activity_repo)
+    correlation_service = CorrelationService(
+        dispute_repo,
+        comm_repo,
+        comment_repo,
+        audit_service,
+        case_repo,
+    )
+
+    case = await case_repo.create_case(
+        case_number=f"CASE-{uuid4().hex[:6].upper()}",
+        customer_email="customer@example.com",
+        gmail_thread_id="gmail-thread-001",
+        rfc_message_id="<original-msg@gmail.com>",
+    )
+    dispute = await dispute_repo.create_dispute(
+        dispute_number=f"DISP-{uuid4().hex[:6].upper()}",
+        case_id=case.id,
+        invoice_id=uuid4(),
+        invoice_number="INV-4001",
+        customer_id=uuid4(),
+        dispute_category="AMENDMENT",
+        status="WAITING_CUSTOMER",
+    )
+    await db_session.commit()
+
+    matched_id = await correlation_service.find_correlated_dispute_for_intake(
+        invoices=[],
+        customer_email="customer@example.com",
+        email_subject="Re: Additional documents",
+        email_body="Please find the requested purchase order attached.",
+        gmail_thread_id="gmail-thread-001",
+        in_reply_to="<original-msg@gmail.com>",
+        email_references="<original-msg@gmail.com>",
+    )
+
+    assert matched_id == dispute.id
+    await db_session.refresh(dispute)
+    assert dispute.status == "OPEN"
+
+
+@pytest.mark.asyncio
 async def test_pre_correlation_node_skips_dispute_generation(
     db_session: AsyncSession,
 ):
