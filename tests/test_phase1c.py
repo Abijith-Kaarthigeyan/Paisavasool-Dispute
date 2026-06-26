@@ -213,6 +213,53 @@ async def test_mail_agent_fallback_templates():
             assert "INV-12345" in res["body"]
 
 
+@pytest.mark.asyncio
+async def test_mail_agent_payment_not_reflected_company_correct_fallback():
+    """Payment disputes must not claim invoice line items are correct when payment unverified."""
+    with patch("src.core.config.settings.settings.OPENROUTER_API_KEY", ""):
+        with patch("src.core.config.settings.settings.GEMINI_API_KEY", ""):
+            res = await DisputeMailAgent.generate_mail(
+                dispute_category="PAYMENT_NOT_REFLECTED",
+                outcome="COMPANY_CORRECT",
+                customer_email="customer@stark.com",
+                activities_summary="- PAYMENT_OUTCOME_PROPOSED: {'reason': 'payment_rejected'}",
+                comments_summary="",
+                invoice_summary='{"invoice_number": "INV-2487", "outstanding_amount": 50000}',
+                invoice_number="INV-2487",
+                customer_message_summary=(
+                    "Subject: Payment not reflected\n"
+                    "UTR HDFCNEFT2026070251782 paid for INV-2487 but still showing outstanding."
+                ),
+            )
+            body = res["body"].lower()
+            assert "unable to verify" in body or "could not verify" in body
+            assert "outstanding" in body
+            assert "invoice details are correct" not in body
+            assert "INV-2487" in res["body"]
+
+
+@pytest.mark.asyncio
+async def test_mail_agent_payment_settled_customer_correct_fallback():
+    """Payment matched outcomes should confirm settlement, not generic invoice messaging."""
+    with patch("src.core.config.settings.settings.OPENROUTER_API_KEY", ""):
+        with patch("src.core.config.settings.settings.GEMINI_API_KEY", ""):
+            res = await DisputeMailAgent.generate_mail(
+                dispute_category="PAYMENT_NOT_REFLECTED",
+                outcome="CUSTOMER_CORRECT",
+                customer_email="customer@stark.com",
+                activities_summary="",
+                comments_summary="",
+                invoice_summary='{"invoice_number": "INV-2487"}',
+                invoice_number="INV-2487",
+                payment_reference="HDFCNEFT2026070251782",
+                customer_message_summary="Payment for INV-2487 not reflected.",
+            )
+            body = res["body"].lower()
+            assert "payment" in body
+            assert "applied" in body or "located" in body
+            assert "HDFCNEFT2026070251782" in res["body"]
+
+
 # --- 4. DETERMINISTIC PATH & ROUTING TESTS ---
 
 

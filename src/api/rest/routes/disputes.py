@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.dependencies import (
     get_activity_repository,
+    get_associate_communication_service,
     get_comment_repository,
     get_communication_repository,
     get_dispute_repository,
@@ -16,6 +17,9 @@ from src.api.dependencies import (
     get_workflow_context_repository,
 )
 from src.core.security.dependencies import require_finance
+from src.core.services.associate_communication_service import (
+    AssociateCommunicationService,
+)
 from src.core.services.audit_service import AuditService
 from src.core.services.recommendation_service import RecommendationService
 from src.core.workflow.interrupt_service import WorkflowInterruptService
@@ -29,6 +33,9 @@ from src.data.repositories.other_repositories import (
 from src.data.repositories.recommendation_repository import RecommendationRepository
 from src.schemas.auth import TokenPayload
 from src.schemas.dispute import (
+    AssociateCommunicationDraftRequest,
+    AssociateCommunicationDraftResponse,
+    AssociateCommunicationSendRequest,
     DisputeActivityResponse,
     DisputeCommentCreate,
     DisputeCommentResponse,
@@ -407,6 +414,71 @@ async def get_dispute_communications(
     """Fetches communications history for a dispute."""
     comms = await comm_repo.get_communications_for_dispute(id)
     return [DisputeCommunicationResponse.model_validate(c) for c in comms]
+
+
+@router.post(
+    "/{id}/communications/draft",
+    response_model=AssociateCommunicationDraftResponse,
+)
+async def draft_associate_communication(
+    id: UUID,
+    payload: AssociateCommunicationDraftRequest,
+    current_user: TokenPayload = Depends(require_finance),
+    dispute_repo: DisputeRepository = Depends(get_dispute_repository),
+    comm_service: AssociateCommunicationService = Depends(
+        get_associate_communication_service
+    ),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Generates an AI-assisted email draft for associate review."""
+    dispute = await dispute_repo.get_by_id(id)
+    if not dispute:
+        raise HTTPException(status_code=404, detail="Dispute not found.")
+
+    draft = await comm_service.draft_email(
+        dispute,
+        associate_instructions=payload.instructions,
+    )
+    return AssociateCommunicationDraftResponse(
+        recipient=draft["recipient"],
+        subject=draft["subject"],
+        body=draft["body"],
+    )
+
+
+@router.post(
+    "/{id}/communications/send",
+    response_model=DisputeCommunicationResponse,
+)
+async def send_associate_communication(
+    id: UUID,
+    payload: AssociateCommunicationSendRequest,
+    current_user: TokenPayload = Depends(require_finance),
+    dispute_repo: DisputeRepository = Depends(get_dispute_repository),
+    comm_service: AssociateCommunicationService = Depends(
+        get_associate_communication_service
+    ),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Persists an associate-authored outbound email on the dispute thread."""
+    dispute = await dispute_repo.get_by_id(id)
+    if not dispute:
+        raise HTTPException(status_code=404, detail="Dispute not found.")
+
+    if not payload.subject.strip() or not payload.body.strip():
+        raise HTTPException(status_code=400, detail="Subject and body are required.")
+    if not payload.recipient.strip():
+        raise HTTPException(status_code=400, detail="Recipient is required.")
+
+    comm = await comm_service.send_email(
+        dispute,
+        recipient=payload.recipient,
+        subject=payload.subject,
+        body=payload.body,
+        sent_by=current_user.sub,
+    )
+    await db.commit()
+    return DisputeCommunicationResponse.model_validate(comm)
 
 
 @router.get("/{id}/evidence")

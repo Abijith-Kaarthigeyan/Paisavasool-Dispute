@@ -3,6 +3,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.config.settings import settings
 from src.core.services.assignment_service import AssignmentService
+from src.core.services.associate_communication_service import (
+    AssociateCommunicationService,
+)
 from src.core.services.audit_service import AuditService
 from src.core.services.correlation_service import CorrelationService
 from src.core.services.escalation_service import EscalationService
@@ -208,3 +211,19 @@ def get_evidence_snapshot_service(
     ),
 ) -> EvidenceSnapshotService:
     return EvidenceSnapshotService(snapshot_repo)
+
+
+def get_associate_communication_service(
+    comm_repo: CommunicationRepository = Depends(get_communication_repository),
+    activity_repo: ActivityRepository = Depends(get_activity_repository),
+    comment_repo: CommentRepository = Depends(get_comment_repository),
+    context_repo: WorkflowContextRepository = Depends(get_workflow_context_repository),
+    audit_service: AuditService = Depends(get_audit_service),
+) -> AssociateCommunicationService:
+    return AssociateCommunicationService(
+        comm_repo=comm_repo,
+        activity_repo=activity_repo,
+        comment_repo=comment_repo,
+        context_repo=context_repo,
+        audit_service=audit_service,
+    )

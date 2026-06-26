@@ -101,3 +101,19 @@ class DisputeCommunicationResponse(BaseModel):
     communication_type: str
     sent_time: datetime = Field(validation_alias="created_at")
     created_at: datetime
+
+
+class AssociateCommunicationDraftRequest(BaseModel):
+    instructions: str | None = None
+
+
+class AssociateCommunicationDraftResponse(BaseModel):
+    recipient: str
+    subject: str
+    body: str
+
+
+class AssociateCommunicationSendRequest(BaseModel):
+    recipient: str
+    subject: str
+    body: str

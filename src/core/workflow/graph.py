@@ -217,9 +217,29 @@ async def _send_customer_outbound_mail(
     comments = await comments_repo.list_comments_for_dispute(dispute_id)
     comm_summary = "\n".join([f"- {c.comment_type}: {c.comment}" for c in comments])
 
-    invoice_json = state.get("metadata", {}).get("invoice_json", {})
+    metadata = dict(state.get("metadata") or {})
+    invoice_json = metadata.get("invoice_json", {})
     recipient = state.get("customer_email") or "customer@example.com"
     invoice_number = dispute.invoice_number or state.get("invoice_number")
+    payment_reference = metadata.get("extracted_reference_number")
+
+    resolution_reason = None
+    for activity in reversed(activities):
+        if (
+            activity.activity_type == "PAYMENT_OUTCOME_PROPOSED"
+            and activity.activity_metadata
+        ):
+            resolution_reason = activity.activity_metadata.get("reason")
+            break
+
+    customer_message_summary = (
+        await ConversationHistoryService.build_customer_conversation_text(
+            db,
+            dispute_id,
+            dispute,
+            state_fallback=state,
+        )
+    )
 
     agent_res = await DisputeMailAgent.generate_mail(
         dispute_category=dispute.dispute_category,
@@ -230,6 +250,9 @@ async def _send_customer_outbound_mail(
         invoice_summary=json.dumps(invoice_json),
         info_request=info_request,
         invoice_number=invoice_number,
+        customer_message_summary=customer_message_summary,
+        payment_reference=payment_reference,
+        resolution_reason=resolution_reason,
     )
 
     await _persist_outbound_customer_mail(db, dispute_id, agent_res)
