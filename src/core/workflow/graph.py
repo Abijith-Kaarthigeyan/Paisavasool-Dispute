@@ -8,13 +8,14 @@ from uuid import UUID, uuid4
 from langchain_core.runnables import RunnableConfig
 from langgraph.errors import NodeInterrupt
 from langgraph.graph import END, StateGraph
-from sqlalchemy import select, text
 
 from src.core.config.settings import settings
 from src.core.services.assignment_service import AssignmentService
 from src.core.services.audit_service import AuditService
 from src.core.services.conversation_history_service import ConversationHistoryService
 from src.core.services.correlation_service import CorrelationService
+from src.core.services.internal_team_config_service import InternalTeamConfigService
+from src.core.services.outbound_email_service import OutboundEmailService
 from src.core.services.recommendation_service import RecommendationService
 from src.core.services.sla_service import SLAService
 from src.core.workflow.amendment_agent import AmendmentResolutionAgent
@@ -25,9 +26,13 @@ from src.core.workflow.payment_reference_agent import PaymentReferenceExtraction
 from src.core.workflow.state import DisputeWorkflowState
 from src.core.workflow.triage_agent import DisputeTriageAgent
 from src.data.clients.ar_service_client import ARServiceClient
+from src.data.repositories.assignment_repository import AssignmentRepository
 from src.data.repositories.case_repository import CaseRepository
 from src.data.repositories.communication_repository import CommunicationRepository
 from src.data.repositories.dispute_repository import DisputeRepository
+from src.data.repositories.internal_team_contact_repository import (
+    InternalTeamContactRepository,
+)
 from src.data.repositories.other_repositories import (
     ActivityRepository,
     AgentRunRepository,
@@ -36,6 +41,8 @@ from src.data.repositories.other_repositories import (
 )
 from src.data.repositories.recommendation_repository import RecommendationRepository
 from src.data.repositories.review_queue_repository import ReviewQueueRepository
+from src.data.repositories.sla_repository import SLARepository
+from src.data.repositories.user_repository import UserRepository
 from src.observability.logging.logger import logger
 
 PAYMENT_DISPUTE_CATEGORIES = frozenset(
@@ -43,6 +50,38 @@ PAYMENT_DISPUTE_CATEGORIES = frozenset(
 )
 
 # --- HELPERS ---
+
+
+def _conversation_history_service(db: Any) -> ConversationHistoryService:
+    return ConversationHistoryService(
+        CommunicationRepository(db),
+        CommentRepository(db),
+    )
+
+
+def _outbound_email_service(db: Any) -> OutboundEmailService:
+    activity_repo = ActivityRepository(db)
+    return OutboundEmailService(
+        ar_client=ARServiceClient(),
+        comm_repo=CommunicationRepository(db),
+        case_repo=CaseRepository(db),
+        audit_service=AuditService(activity_repo),
+    )
+
+
+async def _dispatch_outbound_email(
+    db: Any,
+    dispute: Any,
+    comm: Any,
+    *,
+    use_thread: bool = True,
+) -> None:
+    await _outbound_email_service(db).send_communication(
+        dispute_id=dispute.id,
+        communication=comm,
+        case=getattr(dispute, "case", None),
+        use_thread=use_thread,
+    )
 
 
 async def _record_mail_agent_run(
@@ -76,14 +115,14 @@ async def _persist_outbound_customer_mail(
     db: Any,
     dispute_id: UUID,
     agent_res: dict[str, Any],
-) -> None:
+) -> Any:
     """Stores a generated outbound customer email in dispute_communications."""
     comm_repo = CommunicationRepository(db)
     run_details = agent_res.get("agent_run_details")
     if run_details:
         await _record_mail_agent_run(db, dispute_id, run_details)
 
-    await comm_repo.create_communication(
+    return await comm_repo.create_communication(
         dispute_id=dispute_id,
         recipient=agent_res["recipient"],
         subject=agent_res["subject"],
@@ -232,13 +271,12 @@ async def _send_customer_outbound_mail(
             resolution_reason = activity.activity_metadata.get("reason")
             break
 
-    customer_message_summary = (
-        await ConversationHistoryService.build_customer_conversation_text(
-            db,
-            dispute_id,
-            dispute,
-            state_fallback=state,
-        )
+    customer_message_summary = await _conversation_history_service(
+        db
+    ).build_customer_conversation_text(
+        dispute_id,
+        dispute,
+        state_fallback=state,
     )
 
     agent_res = await DisputeMailAgent.generate_mail(
@@ -255,7 +293,8 @@ async def _send_customer_outbound_mail(
         resolution_reason=resolution_reason,
     )
 
-    await _persist_outbound_customer_mail(db, dispute_id, agent_res)
+    comm = await _persist_outbound_customer_mail(db, dispute_id, agent_res)
+    await _dispatch_outbound_email(db, dispute, comm, use_thread=True)
 
 
 async def case_intake_node(
@@ -275,15 +314,7 @@ async def case_intake_node(
 
     # Check if a case with this message_id already exists to ensure idempotency
     if message_id:
-        from src.data.models.postgres.case import DisputeCase
-
-        result = await db.execute(
-            select(DisputeCase).where(
-                DisputeCase.original_message_id == message_id,
-                DisputeCase.is_deleted.is_(False),
-            )
-        )
-        existing_case = result.scalar_one_or_none()
+        existing_case = await case_repo.find_by_original_message_id(message_id)
         if existing_case:
             current_thread_id = config["configurable"].get("thread_id")
             if current_thread_id and str(existing_case.id) == current_thread_id:
@@ -314,8 +345,7 @@ async def case_intake_node(
 
     # Generate sequential Case Number: CASE-YYYY-000001
     year = datetime.now().year
-    count_res = await db.execute(text("SELECT count(*) FROM dispute_cases"))
-    count = count_res.scalar() or 0
+    count = await case_repo.count_cases()
     case_number = f"CASE-{year}-{count + 1:06d}"
 
     case = await case_repo.create_case(
@@ -447,16 +477,11 @@ async def dispute_generation_node(
     dispute_repo = DisputeRepository(db)
     activity_repo = ActivityRepository(db)
     agent_run_repo = AgentRunRepository(db)
-    from src.data.repositories.sla_repository import SLARepository
-
     sla_repo = SLARepository(db)
 
     # Instantiate services
     audit_service = AuditService(activity_repo)
     sla_service = SLAService(sla_repo, dispute_repo, audit_service, settings)
-
-    from src.data.repositories.assignment_repository import AssignmentRepository
-    from src.data.repositories.user_repository import UserRepository
 
     assign_repo = AssignmentRepository(db)
     u_repo = UserRepository(db)
@@ -465,29 +490,20 @@ async def dispute_generation_node(
     )
 
     generated_disputes = []
+    ar_client = ARServiceClient()
 
     # Map granularity and create disputes: One invoice + one category = one dispute
     for inv in invoices:
         inv_num = inv["invoice_number"]
         dispute_types = inv["dispute_types"]
 
-        # Lookup invoice details from ar.invoices table using invoice_number
-        is_sqlite = (db.bind.dialect.name == "sqlite") if db.bind else False
-        table_name = "invoices" if is_sqlite else "ar.invoices"
-        inv_res = await db.execute(
-            text(
-                f"SELECT id, customer_id, status FROM {table_name} WHERE invoice_number = :num AND is_deleted = false"
-            ),
-            {"num": inv_num},
-        )
-        row = inv_res.first()
-        if row:
-            invoice_id = UUID(row[0]) if isinstance(row[0], str) else row[0]
-            customer_id = UUID(row[1]) if isinstance(row[1], str) else row[1]
+        invoice = await ar_client.lookup_invoice_by_number(inv_num)
+        if invoice:
+            invoice_id = UUID(str(invoice["id"]))
+            customer_id = UUID(str(invoice["customer_id"]))
             invoice_exists = True
-            invoice_cancelled = row[2] == "CANCELLED"
+            invoice_cancelled = invoice.get("status") == "CANCELLED"
         else:
-            # Missing invoice in AR system
             invoice_id = uuid4()
             customer_id = uuid4()
             invoice_exists = False
@@ -496,10 +512,8 @@ async def dispute_generation_node(
         for category in dispute_types:
             normalized_cat = DisputeTriageAgent.normalize_category(category)
 
-            # Generate Dispute Number: DISP-2026-000001
             year = datetime.now().year
-            count_res = await db.execute(text("SELECT count(*) FROM disputes"))
-            count = count_res.scalar() or 0
+            count = await dispute_repo.count_disputes()
             dispute_number = f"DISP-{year}-{count + 1:06d}"
 
             # Create Dispute DB record
@@ -683,10 +697,6 @@ async def assignment_node(
     dispute_id = state["dispute_id"]
 
     dispute_repo = DisputeRepository(db)
-    from src.data.repositories.assignment_repository import AssignmentRepository
-    from src.data.repositories.other_repositories import ActivityRepository
-    from src.data.repositories.user_repository import UserRepository
-
     activity_repo = ActivityRepository(db)
     audit_service = AuditService(activity_repo)
     assign_repo = AssignmentRepository(db)
@@ -727,29 +737,19 @@ async def validation_node(
     if not dispute:
         return {}
 
-    # Query invoice details by number to check cancelled status
-    is_sqlite = (db.bind.dialect.name == "sqlite") if db.bind else False
-    table_name = "invoices" if is_sqlite else "ar.invoices"
-    inv_res = await db.execute(
-        text(
-            f"SELECT id, status FROM {table_name} WHERE invoice_number = :num AND is_deleted = false"
-        ),
-        {"num": dispute.invoice_number},
-    )
-    row = inv_res.first()
+    ar_client = ARServiceClient()
+    invoice = await ar_client.lookup_invoice_by_number(dispute.invoice_number)
 
     requires_review = False
     reason = None
 
-    if not row:
+    if not invoice:
         requires_review = True
         reason = "INVOICE_MISSING"
     else:
-        inv_id, status = row[0], row[1]
-        # Keep invoice_id in dispute up-to-date in case it was resolved manually
-        dispute.invoice_id = UUID(inv_id) if isinstance(inv_id, str) else inv_id
+        dispute.invoice_id = UUID(str(invoice["id"]))
         await dispute_repo.update_dispute(dispute)
-        if status == "CANCELLED":
+        if invoice.get("status") == "CANCELLED":
             requires_review = True
             reason = "INVOICE_CANCELLED"
 
@@ -757,7 +757,7 @@ async def validation_node(
         "[Node End] validation_node - Requires review: %s (%s)", requires_review, reason
     )
     return {
-        "invoice_id": dispute.invoice_id if row else state.get("invoice_id"),
+        "invoice_id": dispute.invoice_id if invoice else state.get("invoice_id"),
         "requires_human_review": requires_review,
         "review_reason": reason,
         "current_node": "validation_node",
@@ -833,17 +833,14 @@ async def routing_node(
         "message_id": state.get("message_id"),
     }
 
-    # Fetch Invoice Snapshot from ar.invoices
-    is_sqlite = (db.bind.dialect.name == "sqlite") if db.bind else False
-    table_name = "invoices" if is_sqlite else "ar.invoices"
+    ar_client = ARServiceClient()
     raw_inv_id = dispute.invoice_id if dispute else state.get("invoice_id")
-    inv_id_param = str(raw_inv_id) if (is_sqlite and raw_inv_id) else raw_inv_id
-    inv_res = await db.execute(
-        text(f"SELECT * FROM {table_name} WHERE id = :id AND is_deleted = false"),
-        {"id": inv_id_param},
-    )
-    inv_row = inv_res.first()
-    invoice_snap = dict(inv_row._mapping) if inv_row else {}
+    invoice_snap: dict[str, Any] = {}
+    if raw_inv_id:
+        try:
+            invoice_snap = await ar_client.get_invoice(UUID(str(raw_inv_id)))
+        except Exception:
+            invoice_snap = {}
 
     validation_snap = {
         "validated_at": datetime.now(UTC).isoformat(),
@@ -972,13 +969,12 @@ async def amendment_resolution_node(
     if not dispute:
         return {}
 
-    raw_customer_text = (
-        await ConversationHistoryService.build_customer_conversation_text(
-            db,
-            dispute_id,
-            dispute,
-            state_fallback=state,
-        )
+    raw_customer_text = await _conversation_history_service(
+        db
+    ).build_customer_conversation_text(
+        dispute_id,
+        dispute,
+        state_fallback=state,
     )
 
     invoice_json = state.get("metadata", {}).get("invoice_json", {})
@@ -1055,9 +1051,6 @@ async def amendment_resolution_node(
         )
 
         # Pause SLA
-        from src.core.services.sla_service import SLAService
-        from src.data.repositories.sla_repository import SLARepository
-
         sla_service = SLAService(
             SLARepository(db), dispute_repo, audit_service, settings
         )
@@ -1109,13 +1102,12 @@ async def reference_extraction_node(
     if not dispute:
         return {}
 
-    raw_customer_text = (
-        await ConversationHistoryService.build_customer_conversation_text(
-            db,
-            dispute_id,
-            dispute,
-            state_fallback=state,
-        )
+    raw_customer_text = await _conversation_history_service(
+        db
+    ).build_customer_conversation_text(
+        dispute_id,
+        dispute,
+        state_fallback=state,
     )
 
     agent_res = await PaymentReferenceExtractionAgent.extract_reference(
@@ -1179,13 +1171,12 @@ async def payment_checker_node(
     ref_num = state.get("metadata", {}).get("extracted_reference_number")
 
     if not ref_num:
-        raw_customer_text = (
-            await ConversationHistoryService.build_customer_conversation_text(
-                db,
-                dispute_id,
-                dispute,
-                state_fallback=state,
-            )
+        raw_customer_text = await _conversation_history_service(
+            db
+        ).build_customer_conversation_text(
+            dispute_id,
+            dispute,
+            state_fallback=state,
         )
         if raw_customer_text.strip():
             logger.info(
@@ -1272,9 +1263,6 @@ async def payment_checker_node(
         )
 
         # Pause SLA
-        from src.core.services.sla_service import SLAService
-        from src.data.repositories.sla_repository import SLARepository
-
         sla_service = SLAService(
             SLARepository(db), dispute_repo, audit_service, settings
         )
@@ -1354,21 +1342,20 @@ async def department_contact_node(
         return {}
 
     category = dispute.dispute_category
-    target_dept = "FINANCE_TEAM"
-    if category == "QUALITY":
-        target_dept = "QUALITY_TEAM"
-    elif category == "LATE_DELIVERY":
-        target_dept = "LOGISTICS_TEAM"
+    team_config = InternalTeamConfigService(InternalTeamContactRepository(db))
+    target_dept = team_config.resolve_team_key(category)
+    recipient = await team_config.get_email_for_team_key(target_dept)
 
     # Save internal notification communication
     comm_repo = CommunicationRepository(db)
-    await comm_repo.create_communication(
+    internal_comm = await comm_repo.create_communication(
         dispute_id=dispute_id,
-        recipient=f"{target_dept.lower()}@paisavasool.com",
+        recipient=recipient,
         subject=f"Escalation Request: Dispute {dispute.dispute_number}",
         body=f"Dispute {dispute.dispute_number} has been escalated to {target_dept} for {category} validation.",
         communication_type="INTERNAL",
     )
+    await _dispatch_outbound_email(db, dispute, internal_comm, use_thread=False)
 
     activity_repo = ActivityRepository(db)
     audit_service = AuditService(activity_repo)
@@ -1561,9 +1548,6 @@ async def close_dispute_node(
     audit_service = AuditService(activity_repo)
 
     # Stop SLA monitoring and record final progress
-    from src.core.services.sla_service import SLAService
-    from src.data.repositories.sla_repository import SLARepository
-
     sla_service = SLAService(SLARepository(db), dispute_repo, audit_service, settings)
     await sla_service.handle_status_change(dispute.id, old_status, "CLOSED")
     await sla_service.calculate_progress(dispute.id)

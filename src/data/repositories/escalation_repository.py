@@ -48,5 +48,13 @@ class EscalationRepository:
             resolved=False,
         )
         self.db.add(escalation)
-        await self.db.flush()
+        if not self.db.sync_session._flushing:
+            await self.db.flush()
+        return escalation
+
+    async def update_escalation(
+        self, escalation: DisputeEscalation
+    ) -> DisputeEscalation:
+        if not self.db.sync_session._flushing:
+            await self.db.flush()
         return escalation

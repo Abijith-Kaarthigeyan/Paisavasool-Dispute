@@ -1,8 +1,6 @@
 import random
 from uuid import UUID
 
-from sqlalchemy import func, select
-
 from src.core.exceptions.business_exceptions import (
     AssignmentException,
     ValidationException,
@@ -29,15 +27,7 @@ class AssignmentService:
 
     async def calculate_workload(self, associate_id: UUID) -> int:
         """Count active disputes (status not in RESOLVED, CLOSED, FAILED) assigned to an associate."""
-        # Find active disputes for associate
-        result = await self.user_repo.db.execute(
-            select(func.count(Dispute.id)).where(
-                Dispute.assigned_to == associate_id,
-                Dispute.status.not_in(["RESOLVED", "CLOSED", "FAILED"]),
-                Dispute.is_deleted.is_(False),
-            )
-        )
-        return result.scalar() or 0
+        return await self.dispute_repo.count_active_disputes_for_associate(associate_id)
 
     async def assign_dispute(
         self, dispute_id: UUID, performed_by: UUID | None = None

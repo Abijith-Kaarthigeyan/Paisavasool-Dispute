@@ -111,8 +111,7 @@ class EscalationService:
         for esc in escalations:
             if not esc.resolved:
                 esc.resolved = True
-                # Trigger db flush through repo update wrapper (or direct session update since we track session)
-                await self.dispute_repo.db.flush()
+                await self.escalation_repo.update_escalation(esc)
 
         await self.audit_service.log_event(
             dispute_id=dispute_id,

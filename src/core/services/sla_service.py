@@ -10,6 +10,7 @@ from src.data.repositories.sla_repository import SLARepository
 from src.observability.logging.logger import logger
 
 TERMINAL_DISPUTE_STATUSES = frozenset({"CLOSED", "RESOLVED", "FAILED"})
+WAITING_CUSTOMER_STATUS = "WAITING_CUSTOMER"
 
 
 class SLAService:
@@ -34,10 +35,70 @@ class SLAService:
         elif category in ["QUALITY", "LATE_DELIVERY", "OTHER"]:
             hours = self.settings.DISPUTE_SLA_OPERATIONAL_HOURS
         else:
-            # Default fallback to operational
             hours = self.settings.DISPUTE_SLA_OPERATIONAL_HOURS
 
         return hours * 60
+
+    @staticmethod
+    def _as_utc(value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value
+
+    async def _pause_sla(
+        self, sla: DisputeSLA, dispute_id: UUID, now: datetime
+    ) -> None:
+        if sla.is_paused:
+            return
+
+        sla.is_paused = True
+        sla.paused_at = now
+        await self.sla_repo.update_sla(sla)
+
+        await self.audit_service.log_event(
+            dispute_id=dispute_id,
+            action="SLA_PAUSED",
+            metadata={"paused_at": now.isoformat(), "reason": WAITING_CUSTOMER_STATUS},
+        )
+
+    async def _resume_sla(
+        self, sla: DisputeSLA, dispute_id: UUID, now: datetime
+    ) -> None:
+        if not sla.is_paused:
+            return
+
+        paused_at = self._as_utc(sla.paused_at or sla.started_at)
+        paused_duration_minutes = (now - paused_at).total_seconds() / 60.0
+        sla.accumulated_paused_minutes += paused_duration_minutes
+        sla.is_paused = False
+        sla.paused_at = None
+        sla.resumed_at = now
+
+        await self.sla_repo.update_sla(sla)
+
+        await self.audit_service.log_event(
+            dispute_id=dispute_id,
+            action="SLA_RESUMED",
+            metadata={
+                "resumed_at": now.isoformat(),
+                "paused_duration_minutes": paused_duration_minutes,
+                "accumulated_paused_minutes": sla.accumulated_paused_minutes,
+            },
+        )
+
+    async def _close_sla(
+        self, sla: DisputeSLA, dispute_id: UUID, now: datetime, reason: str
+    ) -> None:
+        sla.is_paused = False
+        sla.paused_at = None
+        sla.status = "CLOSED"
+        await self.sla_repo.update_sla(sla)
+
+        await self.audit_service.log_event(
+            dispute_id=dispute_id,
+            action="SLA_CLOSED",
+            metadata={"closed_at": now.isoformat(), "reason": reason},
+        )
 
     async def create_sla(self, dispute_id: UUID) -> DisputeSLA:
         """Calculates and persists a new SLA for a dispute."""
@@ -72,67 +133,41 @@ class SLAService:
     async def handle_status_change(
         self, dispute_id: UUID, old_status: str, new_status: str
     ) -> None:
-        """Triggers SLA Pause / Resume based on status transition rules."""
+        """Pause SLA only for WAITING_CUSTOMER; close SLA on terminal dispute statuses."""
         sla = await self.sla_repo.get_by_dispute_id(dispute_id)
         if not sla:
             return
 
         now = datetime.now(UTC)
 
-        # Transitioning TO terminal status: stop SLA permanently
         if new_status in TERMINAL_DISPUTE_STATUSES:
-            sla.is_paused = True
-            sla.paused_at = sla.paused_at or now
-            sla.status = "CLOSED"
-            await self.sla_repo.update_sla(sla)
-
-            await self.audit_service.log_event(
-                dispute_id=dispute_id,
-                action="SLA_PAUSED",
-                metadata={
-                    "paused_at": (sla.paused_at or now).isoformat(),
-                    "reason": f"DISPUTE_{new_status}",
-                    "sla_status": "CLOSED",
-                },
-            )
+            if sla.is_paused and old_status == WAITING_CUSTOMER_STATUS:
+                await self._resume_sla(sla, dispute_id, now)
+            await self._close_sla(sla, dispute_id, now, f"DISPUTE_{new_status}")
             return
 
-        # Transitioning TO WAITING_CUSTOMER: Pause SLA
-        elif new_status == "WAITING_CUSTOMER" and not sla.is_paused:
-            sla.is_paused = True
-            sla.paused_at = now
-            await self.sla_repo.update_sla(sla)
+        if new_status == WAITING_CUSTOMER_STATUS:
+            await self._pause_sla(sla, dispute_id, now)
+            return
 
-            await self.audit_service.log_event(
-                dispute_id=dispute_id,
-                action="SLA_PAUSED",
-                metadata={"paused_at": now.isoformat()},
-            )
+        if sla.is_paused:
+            await self._resume_sla(sla, dispute_id, now)
 
-        # Transitioning AWAY from WAITING_CUSTOMER or terminal status: Resume SLA
-        elif (
-            old_status in ["WAITING_CUSTOMER", *TERMINAL_DISPUTE_STATUSES]
-            and new_status not in ["WAITING_CUSTOMER", *TERMINAL_DISPUTE_STATUSES]
-            and sla.is_paused
-        ):
-            paused_at = (sla.paused_at or sla.started_at).replace(tzinfo=UTC)
-            paused_duration_minutes = (now - paused_at).total_seconds() / 60.0
-            sla.accumulated_paused_minutes += paused_duration_minutes
-            sla.is_paused = False
-            sla.paused_at = None
-            sla.resumed_at = now
+    async def _sync_pause_with_dispute_status(
+        self, sla: DisputeSLA, dispute_id: UUID, dispute_status: str, now: datetime
+    ) -> None:
+        """Keep SLA pause state aligned with dispute status when transitions were missed."""
+        if dispute_status in TERMINAL_DISPUTE_STATUSES:
+            if sla.is_paused:
+                await self._resume_sla(sla, dispute_id, now)
+            return
 
-            await self.sla_repo.update_sla(sla)
+        if dispute_status == WAITING_CUSTOMER_STATUS:
+            await self._pause_sla(sla, dispute_id, now)
+            return
 
-            await self.audit_service.log_event(
-                dispute_id=dispute_id,
-                action="SLA_RESUMED",
-                metadata={
-                    "resumed_at": now.isoformat(),
-                    "paused_duration_minutes": paused_duration_minutes,
-                    "accumulated_paused_minutes": sla.accumulated_paused_minutes,
-                },
-            )
+        if sla.is_paused:
+            await self._resume_sla(sla, dispute_id, now)
 
     async def calculate_progress(self, dispute_id: UUID) -> DisputeSLA | None:
         """Calculates active time elapsed, percentage of SLA used, and updates breach status."""
@@ -149,22 +184,24 @@ class SLAService:
             raise ValidationException("Dispute not found.")
 
         now = datetime.now(UTC)
+        await self._sync_pause_with_dispute_status(sla, dispute_id, dispute.status, now)
+        sla = await self.sla_repo.get_by_dispute_id(dispute_id)
+        if not sla:
+            return None
 
-        # Terminal disputes keep SLA frozen with CLOSED status
+        started_at = self._as_utc(sla.started_at)
+
         if dispute.status in TERMINAL_DISPUTE_STATUSES:
-            if not sla.is_paused:
-                sla.is_paused = True
-                sla.paused_at = dispute.closed_at or dispute.resolved_at or now
-            if sla.paused_at and sla.paused_at.tzinfo is None:
-                sla.paused_at = sla.paused_at.replace(tzinfo=UTC)
+            end_at = (
+                dispute.closed_at or dispute.resolved_at or dispute.updated_at or now
+            )
+            end_at = self._as_utc(end_at)
+            elapsed_total_minutes = (end_at - started_at).total_seconds() / 60.0
+            sla.is_paused = False
+            sla.paused_at = None
             sla.status = "CLOSED"
-            await self.sla_repo.update_sla(sla)
-            return sla
-
-        started_at = sla.started_at.replace(tzinfo=UTC)
-
-        if sla.is_paused:
-            paused_at = (sla.paused_at or now).replace(tzinfo=UTC)
+        elif sla.is_paused:
+            paused_at = self._as_utc(sla.paused_at or now)
             elapsed_total_minutes = (paused_at - started_at).total_seconds() / 60.0
         else:
             elapsed_total_minutes = (now - started_at).total_seconds() / 60.0
@@ -178,12 +215,13 @@ class SLAService:
 
         old_status = sla.status
 
-        if percentage >= 100.0:
+        if dispute.status in TERMINAL_DISPUTE_STATUSES:
+            sla.status = "CLOSED"
+        elif percentage >= 100.0:
             sla.status = "BREACHED"
             if not sla.breached_at:
-                sla.breached_at = (sla.paused_at if sla.is_paused else now).replace(
-                    tzinfo=UTC
-                )
+                breach_at = sla.paused_at if sla.is_paused else now
+                sla.breached_at = self._as_utc(breach_at)
         elif percentage >= 80.0:
             sla.status = "AT_RISK"
         else:

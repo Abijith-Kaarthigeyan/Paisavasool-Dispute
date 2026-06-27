@@ -1,17 +1,16 @@
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
+from src.core.workflow.triage_agent import DisputeTriageAgent
 from src.data.models.postgres.case import DisputeCase
 from src.data.models.postgres.dispute import Dispute
 
 
 def _normalize_invoice_number(invoice_number: str) -> str:
-    from src.core.workflow.triage_agent import DisputeTriageAgent
-
     return DisputeTriageAgent.normalize_invoice_number(invoice_number)
 
 
@@ -41,6 +40,42 @@ class DisputeRepository:
             )
         )
         return result.scalar_one_or_none()
+
+    async def exists(self, dispute_id: UUID) -> bool:
+        result = await self.db.execute(
+            select(Dispute.id).where(
+                Dispute.id == dispute_id,
+                Dispute.is_deleted.is_(False),
+            )
+        )
+        return result.scalar_one_or_none() is not None
+
+    async def count_disputes(self) -> int:
+        result = await self.db.execute(
+            select(func.count())
+            .select_from(Dispute)
+            .where(Dispute.is_deleted.is_(False))
+        )
+        return result.scalar() or 0
+
+    async def count_active_disputes_for_associate(self, associate_id: UUID) -> int:
+        result = await self.db.execute(
+            select(func.count(Dispute.id)).where(
+                Dispute.assigned_to == associate_id,
+                Dispute.status.not_in(["RESOLVED", "CLOSED", "FAILED"]),
+                Dispute.is_deleted.is_(False),
+            )
+        )
+        return result.scalar() or 0
+
+    async def list_disputes_by_case_id(self, case_id: UUID) -> list[Dispute]:
+        result = await self.db.execute(
+            select(Dispute).where(
+                Dispute.case_id == case_id,
+                Dispute.is_deleted.is_(False),
+            )
+        )
+        return list(result.scalars().all())
 
     async def list_disputes(
         self,

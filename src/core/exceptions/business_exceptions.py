@@ -18,6 +18,11 @@ class CaseNotFoundException(BusinessException):
         super().__init__(message, status_code=404)
 
 
+class ReviewQueueItemNotFoundException(BusinessException):
+    def __init__(self, message: str = "Review queue item not found"):
+        super().__init__(message, status_code=404)
+
+
 class DisputeNotFoundException(BusinessException):
     def __init__(self, message: str = "Dispute not found"):
         super().__init__(message, status_code=404)
@@ -41,6 +46,16 @@ class EscalationException(BusinessException):
 class WorkflowException(BusinessException):
     def __init__(self, message: str = "Workflow context error"):
         super().__init__(message, status_code=400)
+
+
+class WorkflowContextNotFoundException(BusinessException):
+    def __init__(self, message: str = "Workflow context not found"):
+        super().__init__(message, status_code=404)
+
+
+class SLADetailsNotFoundException(BusinessException):
+    def __init__(self, message: str = "SLA details not found"):
+        super().__init__(message, status_code=404)
 
 
 class ARServiceClientException(AppException):

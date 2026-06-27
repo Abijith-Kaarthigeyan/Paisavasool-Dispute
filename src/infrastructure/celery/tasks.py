@@ -1,11 +1,27 @@
 import asyncio
+import concurrent.futures
 import traceback
 from collections.abc import Coroutine
 from typing import Any
 from uuid import UUID
 
+import redis
 from celery import Task
+from langgraph.errors import NodeInterrupt
 
+from src.core.config.settings import settings
+from src.core.services.audit_service import AuditService
+from src.core.services.escalation_service import EscalationService
+from src.core.services.sla_service import SLAService
+from src.core.workflow.graph import get_graph
+from src.core.workflow.resume_service import DisputeResumeService
+from src.data.clients.postgres_client import AsyncSessionLocal, engine
+from src.data.repositories.case_repository import CaseRepository
+from src.data.repositories.dispute_repository import DisputeRepository
+from src.data.repositories.escalation_repository import EscalationRepository
+from src.data.repositories.other_repositories import ActivityRepository
+from src.data.repositories.review_queue_repository import ReviewQueueRepository
+from src.data.repositories.sla_repository import SLARepository
 from src.infrastructure.celery.celery_app import celery_app
 from src.observability.logging.logger import logger
 
@@ -15,8 +31,6 @@ async def _wrap_coro(coro: Coroutine[Any, Any, Any]) -> Any:
         return await coro
     finally:
         try:
-            from src.data.clients.postgres_client import engine
-
             await engine.dispose()
         except Exception as e:
             logger.error("Failed to dispose database engine in task wrapper: %s", e)
@@ -31,8 +45,6 @@ def _run_async(coro: Coroutine[Any, Any, Any]) -> Any:
         loop = None
 
     if loop and loop.is_running():
-        import concurrent.futures
-
         with concurrent.futures.ThreadPoolExecutor() as executor:
             future = executor.submit(asyncio.run, wrapped)
             return future.result()
@@ -42,22 +54,11 @@ def _run_async(coro: Coroutine[Any, Any, Any]) -> Any:
 
 async def run_sla_monitoring_async() -> int:
     """Recalculates SLA progress and checks escalations for all open/active disputes."""
-    from src.core.config.settings import settings
-    from src.core.services.audit_service import AuditService
-    from src.core.services.escalation_service import EscalationService
-    from src.core.services.sla_service import SLAService
-    from src.data.clients.postgres_client import AsyncSessionLocal
-    from src.data.repositories.dispute_repository import DisputeRepository
-    from src.data.repositories.escalation_repository import EscalationRepository
-    from src.data.repositories.other_repositories import ActivityRepository
-    from src.data.repositories.sla_repository import SLARepository
-
     async with AsyncSessionLocal() as db:
         dispute_repo = DisputeRepository(db)
         sla_repo = SLARepository(db)
         escalation_repo = EscalationRepository(db)
         activity_repo = ActivityRepository(db)
-
         audit_service = AuditService(activity_repo)
         sla_service = SLAService(sla_repo, dispute_repo, audit_service, settings)
         escalation_service = EscalationService(
@@ -99,12 +100,6 @@ async def handle_task_failure_async(
     dispute_id_str: str, err: Exception, stack: str, retries: int
 ) -> None:
     """Records a task workflow execution failure to the Review Queue on max retries exhaustion."""
-    from src.core.services.audit_service import AuditService
-    from src.data.clients.postgres_client import AsyncSessionLocal
-    from src.data.repositories.dispute_repository import DisputeRepository
-    from src.data.repositories.other_repositories import ActivityRepository
-    from src.data.repositories.review_queue_repository import ReviewQueueRepository
-
     dispute_id = UUID(dispute_id_str)
 
     async with AsyncSessionLocal() as db:
@@ -121,10 +116,6 @@ async def handle_task_failure_async(
         old_status = dispute.status
         dispute.status = "FAILED"
         await dispute_repo.update_dispute(dispute)
-
-        from src.core.config.settings import settings
-        from src.core.services.sla_service import SLAService
-        from src.data.repositories.sla_repository import SLARepository
 
         sla_service = SLAService(
             SLARepository(db), dispute_repo, audit_service, settings
@@ -177,10 +168,6 @@ async def process_dispute_case_async(
     email_references: str = "",
 ) -> None:
     """Runs Case Intake and TriageAgent nodes, then spawns workflows for each generated dispute."""
-    from src.core.workflow.graph import get_graph
-    from src.data.clients.postgres_client import AsyncSessionLocal
-    from src.data.repositories.case_repository import CaseRepository
-
     case_id = UUID(case_id_str)
     async with AsyncSessionLocal() as db:
         case_repo = CaseRepository(db)
@@ -217,10 +204,6 @@ async def process_dispute_case_async(
         metadata = final_state.get("metadata") if isinstance(final_state, dict) else {}
         resume_dispute_id = metadata.get("resume_dispute_id")
         if resume_dispute_id:
-            from src.infrastructure.celery.tasks import (
-                resume_dispute_workflow_after_customer_reply,
-            )
-
             resume_dispute_workflow_after_customer_reply.delay(
                 resume_dispute_id,
                 case.email_subject or "",
@@ -253,13 +236,6 @@ def process_dispute_case(
 
 async def process_dispute_workflow_async(dispute_id_str: str) -> None:
     """Runs dispute validation, correlation, assignment, and routing nodes asynchronously."""
-    from langgraph.errors import NodeInterrupt
-
-    from src.core.workflow.graph import get_graph
-    from src.data.clients.postgres_client import AsyncSessionLocal
-    from src.data.repositories.case_repository import CaseRepository
-    from src.data.repositories.dispute_repository import DisputeRepository
-
     dispute_id = UUID(dispute_id_str)
     async with AsyncSessionLocal() as db:
         dispute_repo = DisputeRepository(db)
@@ -308,10 +284,6 @@ async def process_dispute_workflow_async(dispute_id_str: str) -> None:
             )
             resume_dispute_id = metadata.get("resume_dispute_id")
             if resume_dispute_id:
-                from src.infrastructure.celery.tasks import (
-                    resume_dispute_workflow_after_customer_reply,
-                )
-
                 resume_dispute_workflow_after_customer_reply.delay(
                     resume_dispute_id,
                     case.email_subject or "",
@@ -334,10 +306,6 @@ async def process_dispute_workflow_async(dispute_id_str: str) -> None:
 )
 def process_dispute_workflow(self: Task, dispute_id_str: str) -> str:
     """Celery task executing LangGraph workflow, protected by Redis distributed locking."""
-    import redis
-
-    from src.core.config.settings import settings
-
     lock_key = f"dispute:{dispute_id_str}"
     redis_client = redis.Redis.from_url(settings.REDIS_URL)
 
@@ -371,12 +339,6 @@ async def resume_dispute_workflow_after_customer_reply_async(
     raw_content: str = "",
 ) -> None:
     """Resumes a paused dispute workflow after the customer replies with more information."""
-    from langgraph.errors import NodeInterrupt
-
-    from src.core.workflow.resume_service import DisputeResumeService
-    from src.data.clients.postgres_client import AsyncSessionLocal
-    from src.data.repositories.dispute_repository import DisputeRepository
-
     dispute_id = UUID(dispute_id_str)
     async with AsyncSessionLocal() as db:
         dispute_repo = DisputeRepository(db)
@@ -438,11 +400,6 @@ def resume_dispute_workflow_after_customer_reply(
 
 async def resume_dispute_workflow_async(dispute_id_str: str) -> None:
     """Asynchronously resumes workflow via resume service."""
-    from langgraph.errors import NodeInterrupt
-
-    from src.core.workflow.resume_service import DisputeResumeService
-    from src.data.clients.postgres_client import AsyncSessionLocal
-
     dispute_id = UUID(dispute_id_str)
     async with AsyncSessionLocal() as db:
         resume_service = DisputeResumeService()
@@ -477,12 +434,6 @@ def resume_dispute_workflow(self: Task, dispute_id_str: str) -> str:
 
 async def replay_failed_workflow_async(review_item_id: UUID) -> None:
     """Deletes/resolves review queue item and restarts the workflow task."""
-    from src.core.services.audit_service import AuditService
-    from src.data.clients.postgres_client import AsyncSessionLocal
-    from src.data.repositories.dispute_repository import DisputeRepository
-    from src.data.repositories.other_repositories import ActivityRepository
-    from src.data.repositories.review_queue_repository import ReviewQueueRepository
-
     async with AsyncSessionLocal() as db:
         review_repo = ReviewQueueRepository(db)
         dispute_repo = DisputeRepository(db)

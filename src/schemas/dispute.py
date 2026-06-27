@@ -99,6 +99,8 @@ class DisputeCommunicationResponse(BaseModel):
     subject: str
     message_body: str = Field(validation_alias="body")
     communication_type: str
+    gmail_message_id: str | None = None
+    rfc_message_id: str | None = None
     sent_time: datetime = Field(validation_alias="created_at")
     created_at: datetime
 
@@ -117,3 +119,15 @@ class AssociateCommunicationSendRequest(BaseModel):
     recipient: str
     subject: str
     body: str
+
+
+class DisputeDecisionRequest(BaseModel):
+    decision: str
+    comments: str | None = None
+    amended_invoice_json: dict | None = None
+
+
+class ReviewQueueResolveRequest(BaseModel):
+    invoice_number: str
+    dispute_category: str
+    comments: str | None = None

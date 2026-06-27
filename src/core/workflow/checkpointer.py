@@ -1,5 +1,6 @@
 """LangGraph checkpoint saver using Postgres dispute_workflow_context."""
 
+import json
 from collections.abc import AsyncIterator, Iterator, Sequence
 from typing import Any
 from uuid import UUID
@@ -14,6 +15,7 @@ from langgraph.checkpoint.base import (
 )
 from sqlalchemy.orm.attributes import flag_modified
 
+from src.data.repositories.dispute_repository import DisputeRepository
 from src.data.repositories.workflow_context_repository import WorkflowContextRepository
 
 
@@ -29,12 +31,8 @@ class DbWorkflowCheckpointer(BaseCheckpointSaver):
         except ValueError:
             return False
 
-        from sqlalchemy import select
-
-        from src.data.models.postgres.dispute import Dispute
-
-        result = await db.execute(select(Dispute.id).where(Dispute.id == dispute_id))
-        return result.scalar() is not None
+        dispute_repo = DisputeRepository(db)
+        return await dispute_repo.exists(dispute_id)
 
     def _dumps(self, obj: Any) -> str:
         if obj is None:
@@ -56,8 +54,6 @@ class DbWorkflowCheckpointer(BaseCheckpointSaver):
             except Exception:
                 pass
         # Fallback for json loads
-        import json
-
         try:
             return json.loads(s)
         except Exception:

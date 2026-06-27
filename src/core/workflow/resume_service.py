@@ -5,6 +5,8 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.core.workflow.graph import get_graph
+
 
 class DisputeResumeService:
     """Service to load workflow context and resume graph execution."""
@@ -30,9 +32,6 @@ class DisputeResumeService:
         Returns:
             The final state dict of the execution.
         """
-        # Import dynamically to avoid circular import issues
-        from src.core.workflow.graph import get_graph
-
         config = {
             "configurable": {
                 "thread_id": str(dispute_id),

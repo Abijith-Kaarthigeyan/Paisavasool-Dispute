@@ -10,21 +10,22 @@ from src.data.repositories.other_repositories import CommentRepository
 class ConversationHistoryService:
     """Assembles full customer message history for multi-turn dispute resolution."""
 
-    @staticmethod
+    def __init__(
+        self,
+        comm_repo: CommunicationRepository,
+        comment_repo: CommentRepository,
+    ):
+        self.comm_repo = comm_repo
+        self.comment_repo = comment_repo
+
     async def build_customer_conversation_text(
-        db: Any,
+        self,
         dispute_id: UUID,
         dispute: Any,
         *,
         state_fallback: dict[str, Any] | None = None,
     ) -> str:
-        """Returns chronological customer messages for agent prompts.
-
-        Sources (oldest first):
-        - Original case intake email linked to the dispute
-        - Inbound CUSTOMER communications on the dispute
-        - CUSTOMER_COMMENT follow-ups (deduplicated against communications)
-        """
+        """Returns chronological customer messages for agent prompts."""
         parts: list[str] = []
         seen_bodies: set[str] = set()
 
@@ -45,8 +46,9 @@ class ConversationHistoryService:
             if case_content:
                 _add_entry("Original customer email", case.email_subject, case_content)
 
-        comm_repo = CommunicationRepository(db)
-        comms = await comm_repo.list_customer_communications_chronological(dispute_id)
+        comms = await self.comm_repo.list_customer_communications_chronological(
+            dispute_id
+        )
         for index, comm in enumerate(comms, start=1):
             if comm.communication_type != "CUSTOMER":
                 continue
@@ -56,8 +58,7 @@ class ConversationHistoryService:
                 comm.body,
             )
 
-        comment_repo = CommentRepository(db)
-        comments = await comment_repo.list_comments_for_dispute(dispute_id)
+        comments = await self.comment_repo.list_comments_for_dispute(dispute_id)
         follow_up_index = 0
         for comment in comments:
             if comment.comment_type != "CUSTOMER_COMMENT":

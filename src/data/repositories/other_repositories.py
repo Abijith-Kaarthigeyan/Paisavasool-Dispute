@@ -220,6 +220,15 @@ class EvidenceSnapshotRepository:
         )
         return result.scalar_one_or_none()
 
+    async def list_for_dispute(self, dispute_id: UUID) -> list[DisputeEvidenceSnapshot]:
+        result = await self.db.execute(
+            select(DisputeEvidenceSnapshot).where(
+                DisputeEvidenceSnapshot.dispute_id == dispute_id,
+                DisputeEvidenceSnapshot.is_deleted.is_(False),
+            )
+        )
+        return list(result.scalars().all())
+
     async def create_evidence_snapshot(
         self,
         *,

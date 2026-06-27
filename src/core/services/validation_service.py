@@ -11,6 +11,14 @@ class ValidationService:
     def __init__(self, ar_client: ARServiceClient):
         self.ar_client = ar_client
 
+    async def lookup_invoice_by_number(
+        self, invoice_number: str, custom_token: str | None = None
+    ) -> dict | None:
+        """Returns AR invoice metadata for a number, or None when not found."""
+        return await self.ar_client.lookup_invoice_by_number(
+            invoice_number, custom_token
+        )
+
     async def validate_invoice(
         self, invoice_id: UUID, custom_token: str | None = None
     ) -> None:

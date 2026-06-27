@@ -4,8 +4,10 @@ import json
 from typing import Any
 from uuid import UUID
 
+from src.core.exceptions.business_exceptions import ValidationException
 from src.core.services.audit_service import AuditService
 from src.core.services.conversation_history_service import ConversationHistoryService
+from src.core.services.outbound_email_service import OutboundEmailService
 from src.core.workflow.mail_agent import DisputeMailAgent
 from src.data.clients.ar_service_client import ARServiceClient
 from src.data.repositories.communication_repository import CommunicationRepository
@@ -43,12 +45,18 @@ class AssociateCommunicationService:
         comment_repo: CommentRepository,
         context_repo: WorkflowContextRepository,
         audit_service: AuditService,
+        conversation_history_service: ConversationHistoryService,
+        ar_client: ARServiceClient,
+        outbound_email_service: OutboundEmailService,
     ):
         self.comm_repo = comm_repo
         self.activity_repo = activity_repo
         self.comment_repo = comment_repo
         self.context_repo = context_repo
         self.audit_service = audit_service
+        self.conversation_history_service = conversation_history_service
+        self.ar_client = ar_client
+        self.outbound_email_service = outbound_email_service
 
     async def _resolve_customer_email(self, dispute: Any) -> str:
         case = getattr(dispute, "case", None)
@@ -66,8 +74,7 @@ class AssociateCommunicationService:
                 return json.dumps(invoice_json)
 
         try:
-            ar_client = ARServiceClient()
-            inv_details = await ar_client.get_invoice_details(dispute.invoice_id)
+            inv_details = await self.ar_client.get_invoice_details(dispute.invoice_id)
             formatted = {
                 "invoice_number": inv_details.get(
                     "invoice_number", dispute.invoice_number
@@ -130,8 +137,7 @@ class AssociateCommunicationService:
                 break
 
         customer_message = (
-            await ConversationHistoryService.build_customer_conversation_text(
-                self.comm_repo.db,
+            await self.conversation_history_service.build_customer_conversation_text(
                 dispute_id,
                 dispute,
             )
@@ -177,6 +183,11 @@ class AssociateCommunicationService:
         sent_by: UUID,
     ) -> Any:
         """Persists an associate-authored outbound email to the dispute thread."""
+        if not subject.strip() or not body.strip():
+            raise ValidationException("Subject and body are required.")
+        if not recipient.strip():
+            raise ValidationException("Recipient is required.")
+
         comm = await self.comm_repo.create_communication(
             dispute_id=dispute.id,
             recipient=recipient.strip(),
@@ -204,4 +215,12 @@ class AssociateCommunicationService:
             created_by=sent_by,
         )
 
+        await self.outbound_email_service.send_communication(
+            dispute_id=dispute.id,
+            communication=comm,
+            case=getattr(dispute, "case", None),
+            use_thread=True,
+        )
+
+        await self.comm_repo.db.commit()
         return comm

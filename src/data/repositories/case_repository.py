@@ -1,6 +1,6 @@
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -41,6 +41,23 @@ class CaseRepository:
             .offset(offset)
         )
         return list(result.scalars().all())
+
+    async def find_by_original_message_id(self, message_id: str) -> DisputeCase | None:
+        result = await self.db.execute(
+            select(DisputeCase).where(
+                DisputeCase.original_message_id == message_id,
+                DisputeCase.is_deleted.is_(False),
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def count_cases(self) -> int:
+        result = await self.db.execute(
+            select(func.count())
+            .select_from(DisputeCase)
+            .where(DisputeCase.is_deleted.is_(False))
+        )
+        return result.scalar() or 0
 
     async def create_case(
         self,

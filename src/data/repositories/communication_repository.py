@@ -75,6 +75,8 @@ class CommunicationRepository:
         subject: str,
         body: str,
         communication_type: str,
+        gmail_message_id: str | None = None,
+        rfc_message_id: str | None = None,
     ) -> DisputeCommunication:
         comm = DisputeCommunication(
             dispute_id=dispute_id,
@@ -82,9 +84,26 @@ class CommunicationRepository:
             subject=subject,
             body=body,
             communication_type=communication_type,
+            gmail_message_id=gmail_message_id,
+            rfc_message_id=rfc_message_id,
             created_at=datetime.now(),
         )
         self.db.add(comm)
         if not self.db.sync_session._flushing:
             await self.db.flush()
         return comm
+
+    async def update_thread_metadata(
+        self,
+        communication: DisputeCommunication,
+        *,
+        gmail_message_id: str | None = None,
+        rfc_message_id: str | None = None,
+    ) -> DisputeCommunication:
+        if gmail_message_id is not None:
+            communication.gmail_message_id = gmail_message_id
+        if rfc_message_id is not None:
+            communication.rfc_message_id = rfc_message_id
+        if not self.db.sync_session._flushing:
+            await self.db.flush()
+        return communication

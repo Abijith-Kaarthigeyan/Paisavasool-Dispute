@@ -8,6 +8,7 @@ from src.data.models.postgres.communication import DisputeCommunication
 from src.data.models.postgres.dispute import Dispute
 from src.data.models.postgres.escalation import DisputeEscalation
 from src.data.models.postgres.evidence_snapshot import DisputeEvidenceSnapshot
+from src.data.models.postgres.internal_team_contact import InternalTeamContact
 from src.data.models.postgres.recommendation import DisputeResolutionRecommendation
 from src.data.models.postgres.review_queue import DisputeReviewQueue
 from src.data.models.postgres.sla import DisputeSLA
@@ -29,6 +30,7 @@ __all__ = [
     "DisputeEvidenceSnapshot",
     "DisputeReviewQueue",
     "DisputeCommunication",
+    "InternalTeamContact",
     "RoleMapping",
     "UserMapping",
 ]

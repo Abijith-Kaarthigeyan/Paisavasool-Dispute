@@ -1,3 +1,4 @@
+import logging
 from typing import Any
 
 from celery import Celery
@@ -5,6 +6,7 @@ from celery.schedules import crontab
 from celery.signals import worker_process_init
 
 from src.core.config.settings import settings
+from src.data.clients.postgres_client import engine
 
 celery_app = Celery(
     "dispute_service",
@@ -17,12 +19,8 @@ celery_app = Celery(
 def init_worker_process(*args: Any, **kwargs: Any) -> None:
     """Disposes database engine pool upon worker child process start to prevent shared loop sockets."""
     try:
-        from src.data.clients.postgres_client import engine
-
         engine.sync_engine.dispose()
     except Exception as e:
-        import logging
-
         logging.getLogger("paisavasool.dispute").error(
             "Failed to dispose engine connection pool on worker startup: %s", e
         )
@@ -43,7 +41,7 @@ celery_app.conf.update(
     beat_schedule={
         "run-sla-monitoring-job": {
             "task": "src.infrastructure.celery.tasks.run_sla_monitoring",
-            "schedule": crontab(minute="*/15"),
+            "schedule": crontab(minute="*/10"),
         },
     },
 )

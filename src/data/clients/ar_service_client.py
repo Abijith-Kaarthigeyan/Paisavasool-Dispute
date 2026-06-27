@@ -215,6 +215,26 @@ class ARServiceClient:
         except Exception as e:
             raise ARServiceClientException(f"AR Service communication error: {str(e)}")
 
+    async def lookup_invoice_by_number(
+        self, invoice_number: str, custom_token: str | None = None
+    ) -> dict | None:
+        """Find invoice metadata by invoice number via AR Service."""
+        url = f"{self.base_url}/api/v1/invoices"
+        headers = self._get_headers(custom_token)
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(
+                    url, headers=headers, params={"limit": 1000}, timeout=10.0
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                for invoice in data.get("invoices", []):
+                    if invoice.get("invoice_number") == invoice_number:
+                        return invoice
+                return None
+        except Exception:
+            return None
+
     async def find_payment_reference(
         self, reference_number: str, custom_token: str | None = None
     ) -> str:
@@ -238,3 +258,24 @@ class ARServiceClient:
                 return "REVIEW_QUEUE"
         except Exception:
             return "REVIEW_QUEUE"
+
+    async def send_email(self, payload: dict, custom_token: str | None = None) -> dict:
+        """Send an outbound email via ar-service Gmail integration."""
+        url = f"{self.base_url}/api/v1/emails/send"
+        headers = self._get_headers(custom_token)
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(
+                    url, headers=headers, json=payload, timeout=30.0
+                )
+                resp.raise_for_status()
+                return resp.json()
+        except httpx.HTTPStatusError as e:
+            raise ARServiceClientException(
+                f"AR Service HTTP error: {e.response.text}",
+                status_code=e.response.status_code,
+            )
+        except ARServiceClientException:
+            raise
+        except Exception as e:
+            raise ARServiceClientException(f"AR Service communication error: {str(e)}")
