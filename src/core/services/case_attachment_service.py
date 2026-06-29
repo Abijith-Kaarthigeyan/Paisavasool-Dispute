@@ -12,6 +12,7 @@ from src.core.exceptions.business_exceptions import (
 from src.data.models.postgres.case_attachment import CaseAttachment
 from src.data.repositories.case_attachment_repository import CaseAttachmentRepository
 from src.data.repositories.case_repository import CaseRepository
+from src.observability.logging.logger import logger
 from src.schemas.case import CaseAttachmentDTO
 
 
@@ -81,6 +82,54 @@ class CaseAttachmentService:
         if not case:
             raise CaseNotFoundException(f"Case {case_id} not found.")
         return await self.attachment_repo.list_by_case_id(case_id)
+
+    async def merge_attachments_to_case(
+        self,
+        source_case_id: UUID,
+        target_case_id: UUID,
+    ) -> list[CaseAttachment]:
+        """Copies attachments from a follow-up intake case onto the dispute's primary case."""
+        if source_case_id == target_case_id:
+            return await self.list_attachments(target_case_id)
+
+        target_case = await self.case_repo.get_by_id(target_case_id)
+        if not target_case:
+            raise CaseNotFoundException(f"Case {target_case_id} not found.")
+
+        source_attachments = await self.attachment_repo.list_by_case_id(source_case_id)
+        if not source_attachments:
+            return await self.list_attachments(target_case_id)
+
+        existing = await self.attachment_repo.list_by_case_id(target_case_id)
+        existing_filenames = {attachment.filename for attachment in existing}
+
+        target_dir = self._storage_root() / str(target_case_id)
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        for attachment in source_attachments:
+            if attachment.filename in existing_filenames:
+                continue
+
+            source_path = self._resolve_disk_path(attachment.file_path)
+            if not source_path.is_file():
+                logger.warning(
+                    "Skipping attachment merge for missing file: %s",
+                    attachment.file_path,
+                )
+                continue
+
+            relative_path = f"{target_case_id}/{uuid4()}_{attachment.filename}"
+            destination = self._resolve_disk_path(relative_path)
+            shutil.copy2(source_path, destination)
+            await self.attachment_repo.create_attachment(
+                case_id=target_case_id,
+                filename=attachment.filename,
+                mime_type=attachment.mime_type,
+                file_path=relative_path,
+            )
+            existing_filenames.add(attachment.filename)
+
+        return await self.list_attachments(target_case_id)
 
     async def get_attachment_file(
         self, case_id: UUID, attachment_id: UUID

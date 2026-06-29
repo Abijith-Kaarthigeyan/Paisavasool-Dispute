@@ -23,6 +23,8 @@ class Settings(BaseSettings):
 
     GEMINI_API_KEY: str = ""
     GEMINI_MODEL_NAME: str = "gemini-2.5-flash"
+    GROQ_API_KEY: str = ""
+    GROQ_MODEL_NAME: str = "llama-3.3-70b-versatile"
     OPENROUTER_API_KEY: str = ""
 
     CASE_ATTACHMENT_STORAGE_DIR: str = "/data/case-attachments"

@@ -45,6 +45,14 @@ class CaseIntakeService:
                     message_id,
                     existing.id,
                 )
+                if payload.attachments:
+                    existing_attachments = (
+                        await self.attachment_service.list_attachments(existing.id)
+                    )
+                    if not existing_attachments:
+                        await self.attachment_service.persist_attachments(
+                            existing.id, payload.attachments
+                        )
                 disputes = await self.dispute_repo.list_disputes_by_case_id(existing.id)
                 for dispute in disputes:
                     await self.activity_repo.create_activity(

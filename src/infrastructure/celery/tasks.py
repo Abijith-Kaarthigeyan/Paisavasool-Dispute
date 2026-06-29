@@ -11,11 +11,13 @@ from langgraph.errors import NodeInterrupt
 
 from src.core.config.settings import settings
 from src.core.services.audit_service import AuditService
+from src.core.services.case_attachment_service import CaseAttachmentService
 from src.core.services.escalation_service import EscalationService
 from src.core.services.sla_service import SLAService
 from src.core.workflow.graph import get_graph
 from src.core.workflow.resume_service import DisputeResumeService
 from src.data.clients.postgres_client import AsyncSessionLocal, engine
+from src.data.repositories.case_attachment_repository import CaseAttachmentRepository
 from src.data.repositories.case_repository import CaseRepository
 from src.data.repositories.dispute_repository import DisputeRepository
 from src.data.repositories.escalation_repository import EscalationRepository
@@ -199,10 +201,29 @@ async def process_dispute_case_async(
             "metadata": {},
         }
         final_state = await graph.ainvoke(initial_state, config)
-        await db.commit()
 
         metadata = final_state.get("metadata") if isinstance(final_state, dict) else {}
         resume_dispute_id = metadata.get("resume_dispute_id")
+        if resume_dispute_id:
+            dispute = await DisputeRepository(db).get_by_id(UUID(resume_dispute_id))
+            if dispute and dispute.case_id != case_id:
+                attachment_service = CaseAttachmentService(
+                    case_repo,
+                    CaseAttachmentRepository(db),
+                )
+                merged = await attachment_service.merge_attachments_to_case(
+                    case_id, dispute.case_id
+                )
+                if merged:
+                    logger.info(
+                        "Merged %d attachment(s) from case %s onto dispute case %s",
+                        len(merged),
+                        case_id,
+                        dispute.case_id,
+                    )
+
+        await db.commit()
+
         if resume_dispute_id:
             resume_dispute_workflow_after_customer_reply.delay(
                 resume_dispute_id,

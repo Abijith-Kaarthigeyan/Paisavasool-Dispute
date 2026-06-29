@@ -5,9 +5,7 @@ import re
 import time
 from typing import Any
 
-import httpx
-
-from src.core.config.settings import settings
+from src.core.llm.llm_client import generate_text_completion
 from src.observability.logging.logger import logger
 
 
@@ -120,135 +118,35 @@ Expected JSON Schema:
   }} | null
 }}
 """
-        openrouter_key = settings.OPENROUTER_API_KEY
-        gemini_key = settings.GEMINI_API_KEY
-
-        models_to_try = [
-            ("google/gemini-2.5-flash", "OpenRouter"),
-            ("deepseek/deepseek-chat", "OpenRouter"),
-            ("qwen/qwen-2.5-72b-instruct", "OpenRouter"),
-        ]
-
-        if (
-            openrouter_key
-            and not openrouter_key.startswith("mock-")
-            and openrouter_key.strip()
-        ):
-            for model, provider in models_to_try:
-                start_time = time.time()
-                try:
-                    logger.info(
-                        "Attempting amendment resolution with %s model: %s",
-                        provider,
-                        model,
-                    )
-                    headers = {
-                        "Authorization": f"Bearer {openrouter_key.strip()}",
-                        "Content-Type": "application/json",
-                    }
-                    payload = {
-                        "model": model,
-                        "messages": [{"role": "user", "content": prompt}],
-                        "temperature": 0.0,
-                        "response_format": {"type": "json_object"},
-                    }
-                    async with httpx.AsyncClient() as client:
-                        resp = await client.post(
-                            "https://openrouter.ai/api/v1/chat/completions",
-                            headers=headers,
-                            json=payload,
-                            timeout=15.0,
-                        )
-                        resp.raise_for_status()
-                        result_json = resp.json()
-                        content = result_json["choices"][0]["message"]["content"]
-
-                    latency = time.time() - start_time
-                    logger.info("Amendment resolution succeeded with model: %s", model)
-
-                    parsed = cls._clean_and_parse_json(content)
-                    return {
-                        "resolution_outcome": parsed.get(
-                            "resolution_outcome", "NEED_MORE_INFO"
-                        ),
-                        "confidence": float(parsed.get("confidence", 90.0)),
-                        "reasoning": parsed.get("reasoning", ""),
-                        "recommended_invoice_json": parsed.get(
-                            "recommended_invoice_json"
-                        )
-                        if parsed.get("resolution_outcome") == "CUSTOMER_CORRECT"
-                        else None,
-                        "agent_run_details": {
-                            "prompt": prompt,
-                            "input_payload": {
-                                "raw_customer_text": raw_customer_text,
-                                "invoice_json": invoice_json,
-                            },
-                            "output_payload": parsed,
-                            "latency": latency,
-                            "model": model,
-                            "provider": provider,
-                            "status": "SUCCESS",
-                        },
-                    }
-                except Exception as e:
-                    logger.warning(
-                        "Amendment resolution failed with model %s: %s", model, str(e)
-                    )
-
-        if gemini_key and not gemini_key.startswith("mock-") and gemini_key.strip():
-            start_time = time.time()
-            model = settings.GEMINI_MODEL_NAME
-            provider = "Direct Gemini"
-            try:
-                logger.info(
-                    "Attempting amendment resolution with direct Gemini model: %s",
-                    model,
-                )
-                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={gemini_key.strip()}"
-                payload = {
-                    "contents": [{"parts": [{"text": prompt}]}],
-                    "generationConfig": {
-                        "responseMimeType": "application/json",
-                        "temperature": 0.0,
+        completion = await generate_text_completion(
+            prompt=prompt,
+            temperature=0.0,
+            agent_label="amendment resolution",
+        )
+        if completion:
+            parsed = cls._clean_and_parse_json(completion.content)
+            return {
+                "resolution_outcome": parsed.get(
+                    "resolution_outcome", "NEED_MORE_INFO"
+                ),
+                "confidence": float(parsed.get("confidence", 90.0)),
+                "reasoning": parsed.get("reasoning", ""),
+                "recommended_invoice_json": parsed.get("recommended_invoice_json")
+                if parsed.get("resolution_outcome") == "CUSTOMER_CORRECT"
+                else None,
+                "agent_run_details": {
+                    "prompt": prompt,
+                    "input_payload": {
+                        "raw_customer_text": raw_customer_text,
+                        "invoice_json": invoice_json,
                     },
-                }
-                async with httpx.AsyncClient() as client:
-                    resp = await client.post(url, json=payload, timeout=15.0)
-                    resp.raise_for_status()
-                    result_json = resp.json()
-                    content = result_json["candidates"][0]["content"]["parts"][0][
-                        "text"
-                    ]
-
-                latency = time.time() - start_time
-                logger.info("Direct Gemini amendment resolution succeeded.")
-
-                parsed = cls._clean_and_parse_json(content)
-                return {
-                    "resolution_outcome": parsed.get(
-                        "resolution_outcome", "NEED_MORE_INFO"
-                    ),
-                    "confidence": float(parsed.get("confidence", 90.0)),
-                    "reasoning": parsed.get("reasoning", ""),
-                    "recommended_invoice_json": parsed.get("recommended_invoice_json")
-                    if parsed.get("resolution_outcome") == "CUSTOMER_CORRECT"
-                    else None,
-                    "agent_run_details": {
-                        "prompt": prompt,
-                        "input_payload": {
-                            "raw_customer_text": raw_customer_text,
-                            "invoice_json": invoice_json,
-                        },
-                        "output_payload": parsed,
-                        "latency": latency,
-                        "model": model,
-                        "provider": provider,
-                        "status": "SUCCESS",
-                    },
-                }
-            except Exception as e:
-                logger.error("Direct Gemini amendment resolution failed: %s", str(e))
+                    "output_payload": parsed,
+                    "latency": completion.latency,
+                    "model": completion.model,
+                    "provider": completion.provider,
+                    "status": "SUCCESS",
+                },
+            }
 
         # Regex Fallback
         start_time = time.time()

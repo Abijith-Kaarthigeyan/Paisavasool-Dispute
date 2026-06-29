@@ -5,9 +5,7 @@ import re
 import time
 from typing import Any
 
-import httpx
-
-from src.core.config.settings import settings
+from src.core.llm.llm_client import generate_text_completion
 from src.observability.logging.logger import logger
 
 PAYMENT_CATEGORIES = frozenset({"PAYMENT_ALREADY_DONE", "PAYMENT_NOT_REFLECTED"})
@@ -492,107 +490,27 @@ Output a raw JSON object ONLY (no markdown fences):
         input_payload: dict[str, Any],
         fallback_res: dict[str, str],
     ) -> dict[str, Any]:
-        openrouter_key = settings.OPENROUTER_API_KEY
-        gemini_key = settings.GEMINI_API_KEY
-
-        models_to_try = [
-            ("google/gemini-2.5-flash", "OpenRouter"),
-            ("deepseek/deepseek-chat", "OpenRouter"),
-            ("qwen/qwen-2.5-72b-instruct", "OpenRouter"),
-        ]
-
-        if (
-            openrouter_key
-            and not openrouter_key.startswith("mock-")
-            and openrouter_key.strip()
-        ):
-            for model, provider in models_to_try:
-                start_time = time.time()
-                try:
-                    logger.info(
-                        "Attempting mail generation with %s model: %s", provider, model
-                    )
-                    headers = {
-                        "Authorization": f"Bearer {openrouter_key.strip()}",
-                        "Content-Type": "application/json",
-                    }
-                    payload = {
-                        "model": model,
-                        "messages": [{"role": "user", "content": prompt}],
-                        "temperature": 0.3,
-                        "response_format": {"type": "json_object"},
-                    }
-                    async with httpx.AsyncClient() as client:
-                        resp = await client.post(
-                            "https://openrouter.ai/api/v1/chat/completions",
-                            headers=headers,
-                            json=payload,
-                            timeout=15.0,
-                        )
-                        resp.raise_for_status()
-                        result_json = resp.json()
-                        content = result_json["choices"][0]["message"]["content"]
-
-                    latency = time.time() - start_time
-                    parsed = cls._clean_and_parse_json(content)
-                    return {
-                        "recipient": parsed.get("recipient", customer_email),
-                        "subject": parsed.get("subject", default_subject),
-                        "body": parsed.get("body", ""),
-                        "agent_run_details": {
-                            "prompt": prompt,
-                            "input_payload": input_payload,
-                            "output_payload": parsed,
-                            "latency": latency,
-                            "model": model,
-                            "provider": provider,
-                            "status": "SUCCESS",
-                        },
-                    }
-                except Exception as e:
-                    logger.warning(
-                        "Mail generation failed with model %s: %s", model, str(e)
-                    )
-
-        if gemini_key and not gemini_key.startswith("mock-") and gemini_key.strip():
-            start_time = time.time()
-            model = settings.GEMINI_MODEL_NAME
-            provider = "Direct Gemini"
-            try:
-                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={gemini_key.strip()}"
-                payload = {
-                    "contents": [{"parts": [{"text": prompt}]}],
-                    "generationConfig": {
-                        "responseMimeType": "application/json",
-                        "temperature": 0.3,
-                    },
-                }
-                async with httpx.AsyncClient() as client:
-                    resp = await client.post(url, json=payload, timeout=15.0)
-                    resp.raise_for_status()
-                    result_json = resp.json()
-                    content = result_json["candidates"][0]["content"]["parts"][0][
-                        "text"
-                    ]
-
-                latency = time.time() - start_time
-                parsed = cls._clean_and_parse_json(content)
-                return {
-                    "recipient": parsed.get("recipient", customer_email),
-                    "subject": parsed.get("subject", default_subject),
-                    "body": parsed.get("body", ""),
-                    "agent_run_details": {
-                        "prompt": prompt,
-                        "input_payload": input_payload,
-                        "output_payload": parsed,
-                        "latency": latency,
-                        "model": model,
-                        "provider": provider,
-                        "status": "SUCCESS",
-                    },
-                }
-            except Exception as e:
-                logger.error("Direct Gemini mail generation failed: %s", str(e))
+        completion = await generate_text_completion(
+            prompt=prompt,
+            temperature=0.3,
+            agent_label="mail generation",
+        )
+        if completion:
+            parsed = cls._clean_and_parse_json(completion.content)
+            return {
+                "recipient": parsed.get("recipient", customer_email),
+                "subject": parsed.get("subject", default_subject),
+                "body": parsed.get("body", ""),
+                "agent_run_details": {
+                    "prompt": prompt,
+                    "input_payload": input_payload,
+                    "output_payload": parsed,
+                    "latency": completion.latency,
+                    "model": completion.model,
+                    "provider": completion.provider,
+                    "status": "SUCCESS",
+                },
+            }
 
         start_time = time.time()
         latency = time.time() - start_time
