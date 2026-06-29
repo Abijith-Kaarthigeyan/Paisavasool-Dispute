@@ -66,7 +66,7 @@ Dispute Category: {dispute_category}
 Customer Conversation History (oldest to newest):
 {raw_customer_text}
 
-Invoice JSON:
+Invoice on file (system record):
 {json.dumps(invoice_json, indent=2)}
 
 You must determine one of the following resolution outcomes:
@@ -75,6 +75,10 @@ You must determine one of the following resolution outcomes:
 - NEED_MORE_INFO: We need more information/documents from the customer to make a decision. Set "recommended_invoice_json" to null.
 
 Provide a confidence score (0.0 to 100.0) and detailed reasoning.
+The "reasoning" field is shown directly to AR associates in the product UI. Use plain business language only:
+- Say "invoice on file" or "company records", never "invoice JSON" or "JSON".
+- Say "documents provided by the customer" for customer-supplied files.
+- Cite specific amounts, tax rates, and percentages when explaining discrepancies.
 Only generate "recommended_invoice_json" if the resolution_outcome is "CUSTOMER_CORRECT". Otherwise it must be null.
 
 When generating "recommended_invoice_json", include the FULL corrected invoice using the same structure as the source invoice JSON:
