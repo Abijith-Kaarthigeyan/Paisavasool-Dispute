@@ -7,6 +7,7 @@ from src.core.services.associate_communication_service import (
     AssociateCommunicationService,
 )
 from src.core.services.audit_service import AuditService
+from src.core.services.case_attachment_service import CaseAttachmentService
 from src.core.services.case_intake_service import CaseIntakeService
 from src.core.services.case_service import CaseService
 from src.core.services.conversation_history_service import ConversationHistoryService
@@ -31,6 +32,7 @@ from src.data.repositories import (
     ActivityRepository,
     AgentRunRepository,
     AssignmentRepository,
+    CaseAttachmentRepository,
     CaseRepository,
     CommentRepository,
     CommunicationRepository,
@@ -48,6 +50,12 @@ from src.data.repositories.internal_team_contact_repository import (
 )
 
 # Repository Dependency Getters
+
+
+def get_case_attachment_repository(
+    db: AsyncSession = Depends(get_async_db),
+) -> CaseAttachmentRepository:
+    return CaseAttachmentRepository(db)
 
 
 def get_case_repository(db: AsyncSession = Depends(get_async_db)) -> CaseRepository:
@@ -236,12 +244,20 @@ def get_interrupt_service(
     return WorkflowInterruptService(context_repo, audit_service)
 
 
+def get_case_attachment_service(
+    case_repo: CaseRepository = Depends(get_case_repository),
+    attachment_repo: CaseAttachmentRepository = Depends(get_case_attachment_repository),
+) -> CaseAttachmentService:
+    return CaseAttachmentService(case_repo, attachment_repo)
+
+
 def get_case_intake_service(
     case_repo: CaseRepository = Depends(get_case_repository),
     dispute_repo: DisputeRepository = Depends(get_dispute_repository),
     activity_repo: ActivityRepository = Depends(get_activity_repository),
+    attachment_service: CaseAttachmentService = Depends(get_case_attachment_service),
 ) -> CaseIntakeService:
-    return CaseIntakeService(case_repo, dispute_repo, activity_repo)
+    return CaseIntakeService(case_repo, dispute_repo, activity_repo, attachment_service)
 
 
 def get_dispute_workflow_service(

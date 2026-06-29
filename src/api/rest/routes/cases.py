@@ -1,13 +1,19 @@
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
+from fastapi.responses import FileResponse
 
-from src.api.dependencies import get_case_intake_service, get_case_service
+from src.api.dependencies import (
+    get_case_attachment_service,
+    get_case_intake_service,
+    get_case_service,
+)
 from src.core.security.dependencies import require_finance
+from src.core.services.case_attachment_service import CaseAttachmentService
 from src.core.services.case_intake_service import CaseIntakeService
 from src.core.services.case_service import CaseService
 from src.schemas.auth import TokenPayload
-from src.schemas.case import CaseIntakeRequest, CaseResponse
+from src.schemas.case import CaseAttachmentResponse, CaseIntakeRequest, CaseResponse
 from src.schemas.dispute import DisputeResponse
 
 router = APIRouter(prefix="/cases", tags=["Case Management"])
@@ -47,6 +53,35 @@ async def get_case_disputes(
     """Retrieves all disputes associated with a specific case."""
     disputes = await case_service.list_disputes_for_case(id)
     return [DisputeResponse.model_validate(d) for d in disputes]
+
+
+@router.get("/{case_id}/attachments", response_model=list[CaseAttachmentResponse])
+async def list_case_attachments(
+    case_id: UUID,
+    current_user: TokenPayload = Depends(require_finance),
+    attachment_service: CaseAttachmentService = Depends(get_case_attachment_service),
+):
+    """Lists PDF attachments stored for a case at intake."""
+    attachments = await attachment_service.list_attachments(case_id)
+    return [CaseAttachmentResponse.model_validate(a) for a in attachments]
+
+
+@router.get("/{case_id}/attachments/{attachment_id}/file")
+async def download_case_attachment(
+    case_id: UUID,
+    attachment_id: UUID,
+    current_user: TokenPayload = Depends(require_finance),
+    attachment_service: CaseAttachmentService = Depends(get_case_attachment_service),
+):
+    """Streams a case attachment inline (e.g. PDF in browser)."""
+    disk_path, attachment = await attachment_service.get_attachment_file(
+        case_id, attachment_id
+    )
+    return FileResponse(
+        disk_path,
+        media_type=attachment.mime_type,
+        headers={"Content-Disposition": f'inline; filename="{attachment.filename}"'},
+    )
 
 
 @router.get("/{id}", response_model=CaseResponse)

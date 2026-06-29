@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     GEMINI_MODEL_NAME: str = "gemini-2.5-flash"
     OPENROUTER_API_KEY: str = ""
 
+    CASE_ATTACHMENT_STORAGE_DIR: str = "/data/case-attachments"
+
     # SLA Durations (in Hours)
     DISPUTE_SLA_PAYMENT_HOURS: int = 12
     DISPUTE_SLA_AMENDMENT_HOURS: int = 24

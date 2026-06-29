@@ -18,6 +18,11 @@ class CaseNotFoundException(BusinessException):
         super().__init__(message, status_code=404)
 
 
+class CaseAttachmentNotFoundException(BusinessException):
+    def __init__(self, message: str = "Case attachment not found"):
+        super().__init__(message, status_code=404)
+
+
 class ReviewQueueItemNotFoundException(BusinessException):
     def __init__(self, message: str = "Review queue item not found"):
         super().__init__(message, status_code=404)

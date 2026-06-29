@@ -1,6 +1,7 @@
 from datetime import datetime
 from uuid import UUID
 
+from src.core.services.case_attachment_service import CaseAttachmentService
 from src.data.repositories.case_repository import CaseRepository
 from src.data.repositories.dispute_repository import DisputeRepository
 from src.data.repositories.other_repositories import ActivityRepository
@@ -15,10 +16,12 @@ class CaseIntakeService:
         case_repo: CaseRepository,
         dispute_repo: DisputeRepository,
         activity_repo: ActivityRepository,
+        attachment_service: CaseAttachmentService,
     ):
         self.case_repo = case_repo
         self.dispute_repo = dispute_repo
         self.activity_repo = activity_repo
+        self.attachment_service = attachment_service
 
     async def _generate_case_number(self) -> str:
         year = datetime.now().year
@@ -69,6 +72,10 @@ class CaseIntakeService:
             rfc_message_id=payload.rfc_message_id,
             raw_content=payload.raw_content,
         )
+        if payload.attachments:
+            await self.attachment_service.persist_attachments(
+                case.id, payload.attachments
+            )
         await db.commit()
 
         process_dispute_case.delay(

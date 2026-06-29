@@ -45,3 +45,6 @@ class DisputeCase(Base):
     disputes = relationship(
         "Dispute", back_populates="case", cascade="all, delete-orphan"
     )
+    attachments = relationship(
+        "CaseAttachment", back_populates="case", cascade="all, delete-orphan"
+    )

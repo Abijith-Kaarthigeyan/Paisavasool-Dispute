@@ -1,4 +1,5 @@
 from src.data.repositories.assignment_repository import AssignmentRepository
+from src.data.repositories.case_attachment_repository import CaseAttachmentRepository
 from src.data.repositories.case_repository import CaseRepository
 from src.data.repositories.communication_repository import CommunicationRepository
 from src.data.repositories.dispute_repository import DisputeRepository
@@ -18,6 +19,7 @@ from src.data.repositories.workflow_context_repository import WorkflowContextRep
 
 __all__ = [
     "AssignmentRepository",
+    "CaseAttachmentRepository",
     "CaseRepository",
     "CommunicationRepository",
     "DisputeRepository",
