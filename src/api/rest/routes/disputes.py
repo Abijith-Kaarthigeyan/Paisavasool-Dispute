@@ -7,6 +7,7 @@ from src.api.dependencies import (
     get_dispute_decision_service,
     get_dispute_service,
     get_dispute_workflow_service,
+    get_escalation_service,
 )
 from src.core.security.dependencies import require_finance
 from src.core.services.associate_communication_service import (
@@ -15,6 +16,7 @@ from src.core.services.associate_communication_service import (
 from src.core.services.dispute_decision_service import DisputeDecisionService
 from src.core.services.dispute_service import DisputeService
 from src.core.services.dispute_workflow_service import DisputeWorkflowService
+from src.core.services.escalation_service import EscalationService
 from src.schemas.auth import TokenPayload
 from src.schemas.dispute import (
     AssociateCommunicationDraftRequest,
@@ -25,6 +27,7 @@ from src.schemas.dispute import (
     DisputeCommentResponse,
     DisputeCommunicationResponse,
     DisputeDecisionRequest,
+    DisputeEscalateRequest,
     DisputeResponse,
 )
 
@@ -259,3 +262,18 @@ async def get_dispute_sla(
 ):
     """Fetches SLA details for a dispute."""
     return await dispute_service.get_sla(id)
+
+
+@router.post("/{id}/escalate")
+async def escalate_dispute_manually(
+    id: UUID,
+    payload: DisputeEscalateRequest,
+    current_user: TokenPayload = Depends(require_finance),
+    escalation_service: EscalationService = Depends(get_escalation_service),
+):
+    """Manually escalates a dispute to the manager."""
+    await escalation_service.escalate_to_manager_manually(
+        dispute_id=id,
+        reason=payload.comments,
+    )
+    return {"status": "SUCCESS", "message": "Dispute manually escalated to manager."}

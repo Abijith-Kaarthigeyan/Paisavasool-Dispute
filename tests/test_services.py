@@ -257,6 +257,63 @@ async def test_escalation_rules(db_session: AsyncSession, seed_users):
 
 
 @pytest.mark.asyncio
+async def test_manual_escalation(db_session: AsyncSession, seed_users):
+    case_repo = CaseRepository(db_session)
+    dispute_repo = DisputeRepository(db_session)
+    escalation_repo = EscalationRepository(db_session)
+    activity_repo = ActivityRepository(db_session)
+    sla_repo = SLARepository(db_session)
+    audit_service = AuditService(activity_repo)
+    escalation_service = EscalationService(
+        escalation_repo, sla_repo, dispute_repo, audit_service
+    )
+
+    case = await case_repo.create_case(
+        case_number=f"CASE-{uuid4().hex[:6].upper()}",
+        customer_email="customer@example.com",
+    )
+
+    associate = seed_users["associate"]
+    manager = seed_users["manager"]
+
+    dispute = await dispute_repo.create_dispute(
+        dispute_number=f"DISP-{uuid4().hex[:6].upper()}",
+        case_id=case.id,
+        invoice_id=uuid4(),
+        invoice_number="INV-1003",
+        customer_id=uuid4(),
+        dispute_category="AMENDMENT",
+        status="OPEN",
+        assigned_to=associate.id,
+        manager_id=manager.id,
+    )
+
+    # Escalates manually
+    reason_notes = "Manual escalation request due to override"
+    await escalation_service.escalate_to_manager_manually(
+        dispute_id=dispute.id,
+        reason=reason_notes,
+    )
+
+    # Verify status changed to ESCALATED
+    await db_session.refresh(dispute)
+    assert dispute.status == "ESCALATED"
+
+    # Verify Level 2 escalation record created
+    escalations = await escalation_repo.get_escalations_for_dispute(dispute.id)
+    assert len(escalations) == 1
+    assert escalations[0].level == 2
+    assert escalations[0].escalated_to == manager.id
+    assert escalations[0].reason == reason_notes
+
+    # Verify internal comment was recorded
+    comments = await CommentRepository(db_session).list_comments_for_dispute(dispute.id)
+    assert len(comments) == 1
+    assert "Dispute escalated to manager" in comments[0].comment
+    assert reason_notes in comments[0].comment
+
+
+@pytest.mark.asyncio
 async def test_correlation_engine(db_session: AsyncSession):
     case_repo = CaseRepository(db_session)
     dispute_repo = DisputeRepository(db_session)

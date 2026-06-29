@@ -131,3 +131,7 @@ class ReviewQueueResolveRequest(BaseModel):
     invoice_number: str
     dispute_category: str
     comments: str | None = None
+
+
+class DisputeEscalateRequest(BaseModel):
+    comments: str | None = None
