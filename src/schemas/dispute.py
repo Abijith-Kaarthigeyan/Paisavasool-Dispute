@@ -110,9 +110,12 @@ class AssociateCommunicationDraftRequest(BaseModel):
 
 
 class AssociateCommunicationDraftResponse(BaseModel):
+    id: UUID | None = None
     recipient: str
     subject: str
     body: str
+    status: str | None = None
+    created_at: datetime | None = None
 
 
 class AssociateCommunicationSendRequest(BaseModel):

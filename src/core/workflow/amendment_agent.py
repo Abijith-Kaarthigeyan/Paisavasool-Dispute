@@ -67,10 +67,28 @@ Customer Conversation History (oldest to newest):
 Invoice on file (system record):
 {json.dumps(invoice_json, indent=2)}
 
+DECISION RULES (apply in order; these override general caution):
+
+1. Purchase order / contract matching (billing claims):
+   - If the customer provided a purchase order (PO), contract, or similar supporting document in the conversation, compare it against the invoice on file.
+   - When line items, quantities, unit rates/prices, subtotal, tax rate, and tax amount on the invoice align with the PO/contract, the billing dispute is resolved: choose COMPANY_CORRECT for those billing claims.
+   - Do NOT choose NEED_MORE_INFO and do NOT ask for additional tax, pricing, or line-item documentation when the PO/contract and invoice already agree on those fields.
+
+2. When to use NEED_MORE_INFO (billing only):
+   - Use NEED_MORE_INFO only when essential evidence is still missing AND the invoice on file cannot be validated against documents the customer has already provided.
+   - Examples: no PO/contract was supplied and amounts cannot be verified; customer-provided document is illegible or incomplete; disputed fields cannot be compared because key values are absent from both invoice and supplied documents.
+   - Do NOT use NEED_MORE_INFO merely because the customer disagrees — if their supplied PO/contract supports the invoice as issued, that is COMPANY_CORRECT.
+
+3. Multi-issue disputes (billing + non-billing, e.g. tax/pricing AND late delivery):
+   - Evaluate billing claims (tax, pricing, quantity, line items) separately from operational claims (late delivery, quality, receipt date).
+   - If billing claims are verified as COMPANY_CORRECT against the PO/contract and invoice, choose COMPANY_CORRECT even when a separate operational issue (such as missing delivery/receipt date) cannot yet be verified.
+   - In reasoning, state clearly that billing was reviewed and matches the PO/contract; note any unresolved operational concern without requesting duplicate billing documentation.
+   - Do not withhold COMPANY_CORRECT on billing because an unrelated delivery or quality detail is still outstanding.
+
 You must determine one of the following resolution outcomes:
 - CUSTOMER_CORRECT: The customer's claim is valid and supported by the invoice details or obvious errors. You MUST generate a "recommended_invoice_json" reflecting the corrected subtotal, tax, total, and items.
-- COMPANY_CORRECT: The original invoice is correct and the customer's claim is invalid or incorrect. Set "recommended_invoice_json" to null.
-- NEED_MORE_INFO: We need more information/documents from the customer to make a decision. Set "recommended_invoice_json" to null.
+- COMPANY_CORRECT: The original invoice is correct and the customer's claim is invalid or incorrect, including when a provided PO/contract confirms the invoice as issued. Set "recommended_invoice_json" to null.
+- NEED_MORE_INFO: Essential billing evidence is still missing and the invoice cannot be validated against documents already provided. Set "recommended_invoice_json" to null. Do not use this outcome when PO/contract and invoice already agree on disputed billing fields.
 
 Provide a confidence score (0.0 to 100.0) and detailed reasoning.
 The "reasoning" field is shown directly to AR associates in the product UI. Use plain business language only:

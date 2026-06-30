@@ -101,3 +101,8 @@ class Dispute(Base):
     communications = relationship(
         "DisputeCommunication", back_populates="dispute", cascade="all, delete-orphan"
     )
+    communication_drafts = relationship(
+        "DisputeCommunicationDraft",
+        back_populates="dispute",
+        cascade="all, delete-orphan",
+    )

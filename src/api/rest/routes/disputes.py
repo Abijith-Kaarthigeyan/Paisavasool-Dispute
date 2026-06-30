@@ -1,6 +1,6 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from src.api.dependencies import (
     get_associate_communication_service,
@@ -193,6 +193,33 @@ async def get_dispute_communications(
     return [DisputeCommunicationResponse.model_validate(c) for c in comms]
 
 
+@router.get(
+    "/{id}/communications/draft/latest",
+    response_model=AssociateCommunicationDraftResponse,
+)
+async def get_latest_associate_communication_draft(
+    id: UUID,
+    current_user: TokenPayload = Depends(require_finance),
+    dispute_service: DisputeService = Depends(get_dispute_service),
+    comm_service: AssociateCommunicationService = Depends(
+        get_associate_communication_service
+    ),
+):
+    """Returns the latest active associate reply draft (GENERATING or READY)."""
+    await dispute_service.get_dispute(id)
+    draft = await comm_service.get_latest_draft(id)
+    if not draft:
+        raise HTTPException(status_code=404, detail="No active draft found.")
+    return AssociateCommunicationDraftResponse(
+        id=draft.id,
+        recipient=draft.recipient or "",
+        subject=draft.subject or "",
+        body=draft.body or "",
+        status=draft.status,
+        created_at=draft.created_at,
+    )
+
+
 @router.post(
     "/{id}/communications/draft",
     response_model=AssociateCommunicationDraftResponse,
@@ -208,14 +235,19 @@ async def draft_associate_communication(
 ):
     """Generates an AI-assisted email draft for associate review."""
     dispute = await dispute_service.get_dispute(id)
-    draft = await comm_service.draft_email(
+    draft = await comm_service.generate_and_persist_draft(
         dispute,
-        associate_instructions=payload.instructions,
+        trigger="MANUAL_REGENERATE",
+        instructions=payload.instructions,
     )
+    await comm_service.comm_repo.db.commit()
     return AssociateCommunicationDraftResponse(
-        recipient=draft["recipient"],
-        subject=draft["subject"],
-        body=draft["body"],
+        id=draft.id,
+        recipient=draft.recipient or "",
+        subject=draft.subject or "",
+        body=draft.body or "",
+        status=draft.status,
+        created_at=draft.created_at,
     )
 
 

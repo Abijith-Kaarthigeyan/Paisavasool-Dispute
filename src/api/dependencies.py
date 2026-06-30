@@ -35,6 +35,7 @@ from src.data.repositories import (
     CaseAttachmentRepository,
     CaseRepository,
     CommentRepository,
+    CommunicationDraftRepository,
     CommunicationRepository,
     DisputeRepository,
     EscalationRepository,
@@ -122,6 +123,12 @@ def get_communication_repository(
     db: AsyncSession = Depends(get_async_db),
 ) -> CommunicationRepository:
     return CommunicationRepository(db)
+
+
+def get_communication_draft_repository(
+    db: AsyncSession = Depends(get_async_db),
+) -> CommunicationDraftRepository:
+    return CommunicationDraftRepository(db)
 
 
 def get_evidence_snapshot_repository(
@@ -367,6 +374,9 @@ def get_internal_team_config_service(
 
 def get_associate_communication_service(
     comm_repo: CommunicationRepository = Depends(get_communication_repository),
+    draft_repo: CommunicationDraftRepository = Depends(
+        get_communication_draft_repository
+    ),
     activity_repo: ActivityRepository = Depends(get_activity_repository),
     comment_repo: CommentRepository = Depends(get_comment_repository),
     context_repo: WorkflowContextRepository = Depends(get_workflow_context_repository),
@@ -379,6 +389,7 @@ def get_associate_communication_service(
 ) -> AssociateCommunicationService:
     return AssociateCommunicationService(
         comm_repo=comm_repo,
+        draft_repo=draft_repo,
         activity_repo=activity_repo,
         comment_repo=comment_repo,
         context_repo=context_repo,

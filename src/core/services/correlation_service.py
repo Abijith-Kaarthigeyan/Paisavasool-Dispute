@@ -242,6 +242,13 @@ class CorrelationService:
             metadata={"comment_id": str(comm.id), "source": "correlation"},
         )
 
+        from src.infrastructure.celery.tasks import generate_associate_draft_task
+
+        generate_associate_draft_task.apply_async(
+            args=[str(matched_dispute.id), str(comm.id)],
+            countdown=3,
+        )
+
     def _active_disputes_for_case(self, case, customer_email: str) -> list:
         normalized_email = (customer_email or "").strip().lower()
         case_email = (case.customer_email or "").strip().lower()

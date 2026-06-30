@@ -10,20 +10,34 @@ from celery import Task
 from langgraph.errors import NodeInterrupt
 
 from src.core.config.settings import settings
+from src.core.services.associate_communication_service import (
+    AssociateCommunicationService,
+)
 from src.core.services.audit_service import AuditService
 from src.core.services.case_attachment_service import CaseAttachmentService
+from src.core.services.conversation_history_service import ConversationHistoryService
 from src.core.services.escalation_service import EscalationService
+from src.core.services.outbound_email_service import OutboundEmailService
 from src.core.services.sla_service import SLAService
 from src.core.workflow.graph import get_graph
 from src.core.workflow.resume_service import DisputeResumeService
+from src.data.clients.ar_service_client import ARServiceClient
 from src.data.clients.postgres_client import AsyncSessionLocal, engine
 from src.data.repositories.case_attachment_repository import CaseAttachmentRepository
 from src.data.repositories.case_repository import CaseRepository
+from src.data.repositories.communication_draft_repository import (
+    CommunicationDraftRepository,
+)
+from src.data.repositories.communication_repository import CommunicationRepository
 from src.data.repositories.dispute_repository import DisputeRepository
 from src.data.repositories.escalation_repository import EscalationRepository
-from src.data.repositories.other_repositories import ActivityRepository
+from src.data.repositories.other_repositories import (
+    ActivityRepository,
+    CommentRepository,
+)
 from src.data.repositories.review_queue_repository import ReviewQueueRepository
 from src.data.repositories.sla_repository import SLARepository
+from src.data.repositories.workflow_context_repository import WorkflowContextRepository
 from src.infrastructure.celery.celery_app import celery_app
 from src.observability.logging.logger import logger
 
@@ -160,7 +174,7 @@ def run_sla_monitoring(self: Task) -> int:
     except Exception as e:
         retry_count = self.request.retries
         if retry_count < self.max_retries:
-            raise self.retry(exc=e, countdown=10)
+            raise self.retry(exc=e, countdown=10) from e
         raise e
 
 
@@ -251,7 +265,7 @@ def process_dispute_case(
     except Exception as e:
         retry_count = self.request.retries
         if retry_count < self.max_retries:
-            raise self.retry(exc=e, countdown=10)
+            raise self.retry(exc=e, countdown=10) from e
         raise e
 
 
@@ -344,7 +358,7 @@ def process_dispute_workflow(self: Task, dispute_id_str: str) -> str:
     except Exception as e:
         retry_count = self.request.retries
         if retry_count < self.max_retries:
-            raise self.retry(exc=e, countdown=5)
+            raise self.retry(exc=e, countdown=5) from e
         else:
             stack = traceback.format_exc()
             _run_async(handle_task_failure_async(dispute_id_str, e, stack, retry_count))
@@ -415,7 +429,7 @@ def resume_dispute_workflow_after_customer_reply(
     except Exception as e:
         retry_count = self.request.retries
         if retry_count < self.max_retries:
-            raise self.retry(exc=e, countdown=10)
+            raise self.retry(exc=e, countdown=10) from e
         raise e
 
 
@@ -449,7 +463,7 @@ def resume_dispute_workflow(self: Task, dispute_id_str: str) -> str:
     except Exception as e:
         retry_count = self.request.retries
         if retry_count < self.max_retries:
-            raise self.retry(exc=e, countdown=10)
+            raise self.retry(exc=e, countdown=10) from e
         raise e
 
 
@@ -492,3 +506,86 @@ async def replay_failed_workflow_async(review_item_id: UUID) -> None:
 def replay_failed_workflow_sync(review_item_id: UUID) -> None:
     """Replays a failed workflow (invokable by APIs or admins)."""
     _run_async(replay_failed_workflow_async(review_item_id))
+
+
+def _build_associate_communication_service(db) -> AssociateCommunicationService:
+    comm_repo = CommunicationRepository(db)
+    activity_repo = ActivityRepository(db)
+    comment_repo = CommentRepository(db)
+    audit_service = AuditService(activity_repo)
+    ar_client = ARServiceClient()
+    return AssociateCommunicationService(
+        comm_repo=comm_repo,
+        draft_repo=CommunicationDraftRepository(db),
+        activity_repo=activity_repo,
+        comment_repo=comment_repo,
+        context_repo=WorkflowContextRepository(db),
+        audit_service=audit_service,
+        conversation_history_service=ConversationHistoryService(
+            comm_repo, comment_repo
+        ),
+        ar_client=ar_client,
+        outbound_email_service=OutboundEmailService(
+            ar_client=ar_client,
+            comm_repo=comm_repo,
+            case_repo=CaseRepository(db),
+            audit_service=audit_service,
+        ),
+    )
+
+
+async def generate_associate_draft_async(
+    dispute_id_str: str,
+    source_communication_id_str: str | None = None,
+) -> None:
+    """Generates and persists an associate reply draft after inbound customer email."""
+    dispute_id = UUID(dispute_id_str)
+    source_communication_id = (
+        UUID(source_communication_id_str) if source_communication_id_str else None
+    )
+
+    async with AsyncSessionLocal() as db:
+        dispute_repo = DisputeRepository(db)
+        dispute = await dispute_repo.get_by_id(dispute_id)
+        if not dispute:
+            logger.warning(
+                "Skipping associate draft generation; dispute %s not found",
+                dispute_id,
+            )
+            return
+
+        comm_service = _build_associate_communication_service(db)
+        try:
+            await comm_service.generate_and_persist_draft(
+                dispute,
+                trigger="AUTO_INBOUND",
+                source_communication_id=source_communication_id,
+            )
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
+
+
+@celery_app.task(
+    bind=True,
+    name="src.infrastructure.celery.tasks.generate_associate_draft",
+    max_retries=2,
+    queue="dispute_processing",
+)
+def generate_associate_draft_task(
+    self: Task,
+    dispute_id_str: str,
+    source_communication_id_str: str | None = None,
+) -> str:
+    """Celery task to auto-generate an associate reply draft for a dispute."""
+    try:
+        _run_async(
+            generate_associate_draft_async(dispute_id_str, source_communication_id_str)
+        )
+        return "SUCCESS"
+    except Exception as e:
+        retry_count = self.request.retries
+        if retry_count < self.max_retries:
+            raise self.retry(exc=e, countdown=10) from e
+        raise e

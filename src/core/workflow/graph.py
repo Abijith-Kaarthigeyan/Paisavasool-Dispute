@@ -208,12 +208,19 @@ async def _persist_inbound_customer_email(
     if already_recorded:
         return
 
-    await comm_repo.create_communication(
+    comm = await comm_repo.create_communication(
         dispute_id=dispute_id,
         recipient=customer_email or "customer@example.com",
         subject=normalized_subject or "(No Subject)",
         body=normalized_body,
         communication_type="CUSTOMER",
+    )
+
+    from src.infrastructure.celery.tasks import generate_associate_draft_task
+
+    generate_associate_draft_task.apply_async(
+        args=[str(dispute_id), str(comm.id)],
+        countdown=3,
     )
 
 

@@ -10,6 +10,10 @@ from src.core.services.conversation_history_service import ConversationHistorySe
 from src.core.services.outbound_email_service import OutboundEmailService
 from src.core.workflow.mail_agent import DisputeMailAgent
 from src.data.clients.ar_service_client import ARServiceClient
+from src.data.models.postgres.communication_draft import DisputeCommunicationDraft
+from src.data.repositories.communication_draft_repository import (
+    CommunicationDraftRepository,
+)
 from src.data.repositories.communication_repository import CommunicationRepository
 from src.data.repositories.other_repositories import (
     ActivityRepository,
@@ -41,6 +45,7 @@ class AssociateCommunicationService:
         self,
         *,
         comm_repo: CommunicationRepository,
+        draft_repo: CommunicationDraftRepository,
         activity_repo: ActivityRepository,
         comment_repo: CommentRepository,
         context_repo: WorkflowContextRepository,
@@ -50,6 +55,7 @@ class AssociateCommunicationService:
         outbound_email_service: OutboundEmailService,
     ):
         self.comm_repo = comm_repo
+        self.draft_repo = draft_repo
         self.activity_repo = activity_repo
         self.comment_repo = comment_repo
         self.context_repo = context_repo
@@ -173,6 +179,39 @@ class AssociateCommunicationService:
             associate_instructions=associate_instructions,
         )
 
+    async def generate_and_persist_draft(
+        self,
+        dispute: Any,
+        *,
+        trigger: str,
+        source_communication_id: UUID | None = None,
+        instructions: str | None = None,
+    ) -> DisputeCommunicationDraft:
+        """Creates a GENERATING draft row, runs LLM drafting, and marks it READY."""
+        draft = await self.draft_repo.create_generating(
+            dispute_id=dispute.id,
+            trigger=trigger,
+            source_communication_id=source_communication_id,
+        )
+        result = await self.draft_email(
+            dispute,
+            associate_instructions=instructions,
+        )
+        return await self.draft_repo.mark_ready(
+            draft,
+            recipient=result["recipient"],
+            subject=result["subject"],
+            body=result["body"],
+        )
+
+    async def get_latest_draft(
+        self, dispute_id: UUID
+    ) -> DisputeCommunicationDraft | None:
+        return await self.draft_repo.get_latest_active(dispute_id)
+
+    async def mark_drafts_sent(self, dispute_id: UUID) -> None:
+        await self.draft_repo.mark_sent_for_dispute(dispute_id)
+
     async def send_email(
         self,
         dispute: Any,
@@ -222,5 +261,6 @@ class AssociateCommunicationService:
             use_thread=True,
         )
 
+        await self.mark_drafts_sent(dispute.id)
         await self.comm_repo.db.commit()
         return comm
