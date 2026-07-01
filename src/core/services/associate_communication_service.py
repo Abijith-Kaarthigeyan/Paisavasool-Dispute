@@ -1,5 +1,6 @@
 """Associate-initiated customer communications with AI-assisted drafting."""
 
+import base64
 import json
 from typing import Any
 from uuid import UUID
@@ -36,6 +37,58 @@ def _is_system_outbound_communication(comm: Any) -> bool:
         "update on your dispute",
     )
     return any(marker in subject or marker in body for marker in markers)
+
+
+_MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
+_MAX_ATTACHMENTS = 5
+
+
+def _validate_pdf_attachments(
+    attachments: list[dict[str, str]],
+) -> list[dict[str, str]]:
+    if len(attachments) > _MAX_ATTACHMENTS:
+        raise ValidationException(
+            f"At most {_MAX_ATTACHMENTS} PDF attachments are allowed."
+        )
+
+    validated: list[dict[str, str]] = []
+    for attachment in attachments:
+        filename = (attachment.get("filename") or "").strip()
+        content_base64 = (attachment.get("content_base64") or "").strip()
+        mime_type = (attachment.get("mime_type") or "application/pdf").strip().lower()
+
+        if not filename.lower().endswith(".pdf"):
+            raise ValidationException("Only PDF attachments are supported.")
+        if mime_type != "application/pdf":
+            raise ValidationException("Only PDF attachments are supported.")
+
+        try:
+            file_bytes = base64.b64decode(content_base64, validate=True)
+        except Exception as exc:
+            raise ValidationException("Invalid attachment encoding.") from exc
+
+        if not file_bytes:
+            raise ValidationException(f"Attachment {filename} is empty.")
+        if len(file_bytes) > _MAX_ATTACHMENT_BYTES:
+            raise ValidationException(
+                f"Attachment {filename} exceeds the 10 MB size limit."
+            )
+
+        validated.append(
+            {
+                "filename": filename,
+                "content_base64": content_base64,
+                "mime_type": mime_type,
+            }
+        )
+    return validated
+
+
+def _append_attachment_list_to_body(body: str, filenames: list[str]) -> str:
+    if not filenames:
+        return body
+    lines = "\n".join(f"- {name}" for name in filenames)
+    return f"{body.rstrip()}\n\nAttachments:\n{lines}"
 
 
 class AssociateCommunicationService:
@@ -220,6 +273,7 @@ class AssociateCommunicationService:
         subject: str,
         body: str,
         sent_by: UUID,
+        attachments: list[dict[str, str]] | None = None,
     ) -> Any:
         """Persists an associate-authored outbound email to the dispute thread."""
         if not subject.strip() or not body.strip():
@@ -227,11 +281,17 @@ class AssociateCommunicationService:
         if not recipient.strip():
             raise ValidationException("Recipient is required.")
 
+        validated_attachments = _validate_pdf_attachments(attachments or [])
+        persisted_body = _append_attachment_list_to_body(
+            body.strip(),
+            [att["filename"] for att in validated_attachments],
+        )
+
         comm = await self.comm_repo.create_communication(
             dispute_id=dispute.id,
             recipient=recipient.strip(),
             subject=subject.strip(),
-            body=body.strip(),
+            body=persisted_body,
             communication_type="ASSOCIATE_OUTBOUND",
         )
 
@@ -243,6 +303,9 @@ class AssociateCommunicationService:
                 "recipient": recipient,
                 "subject": subject,
                 "sent_by": str(sent_by),
+                "attachment_filenames": [
+                    att["filename"] for att in validated_attachments
+                ],
             },
             performed_by=sent_by,
         )
@@ -259,6 +322,8 @@ class AssociateCommunicationService:
             communication=comm,
             case=getattr(dispute, "case", None),
             use_thread=True,
+            attachments=validated_attachments or None,
+            email_body=body.strip(),
         )
 
         await self.mark_drafts_sent(dispute.id)

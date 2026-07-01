@@ -275,6 +275,14 @@ async def send_associate_communication(
         subject=payload.subject,
         body=payload.body,
         sent_by=current_user.sub,
+        attachments=[
+            {
+                "filename": att.filename,
+                "content_base64": att.content_base64,
+                "mime_type": att.mime_type,
+            }
+            for att in payload.attachments
+        ],
     )
     return DisputeCommunicationResponse.model_validate(comm)
 

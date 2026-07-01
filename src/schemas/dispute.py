@@ -119,10 +119,17 @@ class AssociateCommunicationDraftResponse(BaseModel):
     created_at: datetime | None = None
 
 
+class OutboundEmailAttachment(BaseModel):
+    filename: str = Field(min_length=1)
+    content_base64: str = Field(min_length=1)
+    mime_type: str = Field(default="application/pdf")
+
+
 class AssociateCommunicationSendRequest(BaseModel):
     recipient: str
     subject: str
     body: str
+    attachments: list[OutboundEmailAttachment] = Field(default_factory=list)
 
 
 class DisputeDecisionRequest(BaseModel):

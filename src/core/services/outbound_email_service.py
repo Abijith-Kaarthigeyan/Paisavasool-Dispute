@@ -41,6 +41,8 @@ class OutboundEmailService:
         communication: Any,
         case: Any | None = None,
         use_thread: bool = True,
+        attachments: list[dict[str, str]] | None = None,
+        email_body: str | None = None,
     ) -> None:
         """Deliver a persisted communication and update thread metadata on success."""
         thread_meta = await self._resolve_thread_metadata(
@@ -48,12 +50,21 @@ class OutboundEmailService:
             case=case,
             use_thread=use_thread,
         )
-        payload = {
+        payload: dict[str, Any] = {
             "to": communication.recipient,
             "subject": communication.subject,
-            "body": communication.body,
+            "body": email_body if email_body is not None else communication.body,
             **thread_meta,
         }
+        if attachments:
+            payload["attachments"] = [
+                {
+                    "filename": att["filename"],
+                    "content_base64": att["content_base64"],
+                    "mime_type": att.get("mime_type", "application/pdf"),
+                }
+                for att in attachments
+            ]
 
         try:
             result = await self.ar_client.send_email(payload)
