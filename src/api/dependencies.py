@@ -12,6 +12,7 @@ from src.core.services.case_intake_service import CaseIntakeService
 from src.core.services.case_service import CaseService
 from src.core.services.conversation_history_service import ConversationHistoryService
 from src.core.services.correlation_service import CorrelationService
+from src.core.services.dispute_close_service import DisputeCloseService
 from src.core.services.dispute_decision_service import DisputeDecisionService
 from src.core.services.dispute_service import DisputeService
 from src.core.services.dispute_workflow_service import DisputeWorkflowService
@@ -280,6 +281,32 @@ def get_dispute_workflow_service(
         workflow_context_service,
         interrupt_service,
         resume_service,
+    )
+
+
+def get_dispute_close_service(
+    dispute_repo: DisputeRepository = Depends(get_dispute_repository),
+    sla_repo: SLARepository = Depends(get_sla_repository),
+    audit_service: AuditService = Depends(get_audit_service),
+    ar_client: ARServiceClient = Depends(get_ar_service_client),
+    escalation_service: EscalationService = Depends(get_escalation_service),
+    workflow_context_service: WorkflowContextService = Depends(
+        get_workflow_context_service
+    ),
+    workflow_context_repo: WorkflowContextRepository = Depends(
+        get_workflow_context_repository
+    ),
+    comment_repo: CommentRepository = Depends(get_comment_repository),
+) -> DisputeCloseService:
+    return DisputeCloseService(
+        dispute_repo=dispute_repo,
+        sla_repo=sla_repo,
+        audit_service=audit_service,
+        ar_client=ar_client,
+        escalation_service=escalation_service,
+        workflow_context_service=workflow_context_service,
+        workflow_context_repo=workflow_context_repo,
+        comment_repo=comment_repo,
     )
 
 

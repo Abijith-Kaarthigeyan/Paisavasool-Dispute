@@ -178,6 +178,22 @@ def run_sla_monitoring(self: Task) -> int:
         raise e
 
 
+def _schedule_associate_draft_from_metadata(metadata: dict | None) -> None:
+    """Enqueues associate draft generation after the inbound communication is committed."""
+    if not metadata:
+        return
+    draft_meta = metadata.get("associate_draft")
+    if not isinstance(draft_meta, dict):
+        return
+    dispute_id = draft_meta.get("dispute_id")
+    if not dispute_id:
+        return
+    generate_associate_draft_task.delay(
+        dispute_id,
+        draft_meta.get("source_communication_id"),
+    )
+
+
 async def process_dispute_case_async(
     case_id_str: str,
     in_reply_to: str = "",
@@ -237,6 +253,10 @@ async def process_dispute_case_async(
                     )
 
         await db.commit()
+
+        _schedule_associate_draft_from_metadata(
+            final_state.get("metadata") if isinstance(final_state, dict) else None
+        )
 
         if resume_dispute_id:
             resume_dispute_workflow_after_customer_reply.delay(
@@ -317,6 +337,8 @@ async def process_dispute_workflow_async(dispute_id_str: str) -> None:
             metadata = (
                 final_state.get("metadata") if isinstance(final_state, dict) else {}
             )
+            _schedule_associate_draft_from_metadata(metadata)
+
             resume_dispute_id = metadata.get("resume_dispute_id")
             if resume_dispute_id:
                 resume_dispute_workflow_after_customer_reply.delay(
@@ -553,6 +575,14 @@ async def generate_associate_draft_async(
                 dispute_id,
             )
             return
+
+        if source_communication_id:
+            comm_repo = CommunicationRepository(db)
+            source_comm = await comm_repo.get_by_id(source_communication_id)
+            if not source_comm:
+                raise RuntimeError(
+                    f"Source communication {source_communication_id} not found"
+                )
 
         comm_service = _build_associate_communication_service(db)
         try:

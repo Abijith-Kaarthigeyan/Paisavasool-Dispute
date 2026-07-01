@@ -13,6 +13,8 @@ from src.data.repositories.other_repositories import (
     CommentRepository,
 )
 
+TERMINAL_DECISION_STATUSES = frozenset({"CLOSED", "FAILED", "CANCELLED"})
+
 
 class DisputeDecisionService:
     def __init__(
@@ -33,6 +35,10 @@ class DisputeDecisionService:
         dispute = await self.dispute_repo.get_by_id(dispute_id)
         if not dispute:
             raise DisputeNotFoundException(f"Dispute {dispute_id} not found.")
+        if dispute.status in TERMINAL_DECISION_STATUSES:
+            raise ValidationException(
+                f"Cannot submit decision for dispute in status {dispute.status}."
+            )
         return dispute
 
     async def _record_decision(

@@ -1,4 +1,5 @@
 import re
+from dataclasses import dataclass
 from uuid import UUID
 
 from src.core.services.audit_service import AuditService
@@ -8,6 +9,12 @@ from src.data.repositories.case_repository import CaseRepository
 from src.data.repositories.communication_repository import CommunicationRepository
 from src.data.repositories.dispute_repository import DisputeRepository
 from src.data.repositories.other_repositories import CommentRepository
+
+
+@dataclass(frozen=True)
+class CorrelatedInbound:
+    dispute_id: UUID
+    source_communication_id: UUID
 
 
 class CorrelationService:
@@ -207,7 +214,7 @@ class CorrelationService:
         email_subject: str,
         email_body: str,
         raw_content: str | None = None,
-    ) -> None:
+    ) -> UUID:
         message_content = (raw_content or email_body or "").strip()
         comm = await self.communication_repo.create_communication(
             dispute_id=matched_dispute.id,
@@ -242,12 +249,7 @@ class CorrelationService:
             metadata={"comment_id": str(comm.id), "source": "correlation"},
         )
 
-        from src.infrastructure.celery.tasks import generate_associate_draft_task
-
-        generate_associate_draft_task.apply_async(
-            args=[str(matched_dispute.id), str(comm.id)],
-            countdown=3,
-        )
+        return comm.id
 
     def _active_disputes_for_case(self, case, customer_email: str) -> list:
         normalized_email = (customer_email or "").strip().lower()
@@ -312,7 +314,7 @@ class CorrelationService:
         email_body: str,
         raw_content: str | None,
         inferred_categories: list[str],
-    ) -> UUID | None:
+    ) -> CorrelatedInbound | None:
         if not self.case_repo:
             return None
 
@@ -322,7 +324,7 @@ class CorrelationService:
                 cases, inferred_categories, customer_email
             )
             if matched_dispute:
-                await self._attach_inbound_communication(
+                comm_id = await self._attach_inbound_communication(
                     matched_dispute=matched_dispute,
                     customer_email=customer_email,
                     email_subject=email_subject,
@@ -330,7 +332,7 @@ class CorrelationService:
                     raw_content=raw_content,
                 )
                 await self._reopen_if_waiting_customer(matched_dispute)
-                return matched_dispute.id
+                return CorrelatedInbound(matched_dispute.id, comm_id)
 
         reference_tokens = extract_reference_tokens(in_reply_to, email_references)
         for token in reference_tokens:
@@ -340,7 +342,7 @@ class CorrelationService:
                     [case], inferred_categories, customer_email
                 )
                 if matched_dispute:
-                    await self._attach_inbound_communication(
+                    comm_id = await self._attach_inbound_communication(
                         matched_dispute=matched_dispute,
                         customer_email=customer_email,
                         email_subject=email_subject,
@@ -348,7 +350,7 @@ class CorrelationService:
                         raw_content=raw_content,
                     )
                     await self._reopen_if_waiting_customer(matched_dispute)
-                    return matched_dispute.id
+                    return CorrelatedInbound(matched_dispute.id, comm_id)
 
         matched_dispute = await self._find_dispute_by_communication_tokens(
             reference_tokens
@@ -359,7 +361,7 @@ class CorrelationService:
                 sender_email = customer_email.strip().lower()
                 if case_email and sender_email != case_email:
                     return None
-            await self._attach_inbound_communication(
+            comm_id = await self._attach_inbound_communication(
                 matched_dispute=matched_dispute,
                 customer_email=customer_email,
                 email_subject=email_subject,
@@ -367,7 +369,7 @@ class CorrelationService:
                 raw_content=raw_content,
             )
             await self._reopen_if_waiting_customer(matched_dispute)
-            return matched_dispute.id
+            return CorrelatedInbound(matched_dispute.id, comm_id)
 
         return None
 
@@ -381,10 +383,11 @@ class CorrelationService:
         email_body: str,
         raw_content: str | None = None,
         exclude_dispute_id: UUID | None = None,
-    ) -> UUID | None:
+    ) -> CorrelatedInbound | None:
         """Correlates an incoming dispute detail against active dispute workflows.
 
-        If a match is found, attaches the email as a communication/comment and returns the dispute ID.
+        If a match is found, attaches the email as a communication/comment and returns
+        the matched dispute plus the persisted communication id.
         If no match is found, returns None (caller should create a new dispute workflow).
         """
         normalized_invoice = DisputeTriageAgent.normalize_invoice_number(invoice_number)
@@ -400,7 +403,7 @@ class CorrelationService:
         if not matched_dispute:
             return None
 
-        await self._attach_inbound_communication(
+        comm_id = await self._attach_inbound_communication(
             matched_dispute=matched_dispute,
             customer_email=customer_email,
             email_subject=email_subject,
@@ -409,7 +412,7 @@ class CorrelationService:
         )
         await self._reopen_if_waiting_customer(matched_dispute)
 
-        return matched_dispute.id
+        return CorrelatedInbound(matched_dispute.id, comm_id)
 
     async def find_correlated_dispute_for_intake(
         self,
@@ -422,7 +425,7 @@ class CorrelationService:
         gmail_thread_id: str | None = None,
         in_reply_to: str | None = None,
         email_references: str | None = None,
-    ) -> UUID | None:
+    ) -> CorrelatedInbound | None:
         """Correlates an incoming case email before new disputes are generated."""
         content = raw_content or f"{email_subject}\n{email_body}"
         inferred_categories = self._rank_categories_for_content(
@@ -447,7 +450,7 @@ class CorrelationService:
         if dispute_number:
             dispute = await self.dispute_repo.get_by_dispute_number(dispute_number)
             if dispute and dispute.status in self.ACTIVE_STATUSES:
-                await self._attach_inbound_communication(
+                comm_id = await self._attach_inbound_communication(
                     matched_dispute=dispute,
                     customer_email=customer_email,
                     email_subject=email_subject,
@@ -455,7 +458,7 @@ class CorrelationService:
                     raw_content=raw_content,
                 )
                 await self._reopen_if_waiting_customer(dispute)
-                return dispute.id
+                return CorrelatedInbound(dispute.id, comm_id)
 
         invoice_category_pairs: list[tuple[str, str]] = []
         for inv in invoices:
@@ -476,7 +479,7 @@ class CorrelationService:
         )
 
         for inv_num, category in invoice_category_pairs:
-            matched_id = await self.correlate_dispute(
+            correlated = await self.correlate_dispute(
                 invoice_number=inv_num,
                 raw_category=category,
                 customer_email=customer_email,
@@ -484,13 +487,13 @@ class CorrelationService:
                 email_body=email_body,
                 raw_content=raw_content,
             )
-            if matched_id:
-                return matched_id
+            if correlated:
+                return correlated
 
         extracted_invoices = self._extract_invoice_numbers_from_text(content)
         for inv_num in extracted_invoices:
             for category in inferred_categories:
-                matched_id = await self.correlate_dispute(
+                correlated = await self.correlate_dispute(
                     invoice_number=inv_num,
                     raw_category=category,
                     customer_email=customer_email,
@@ -498,8 +501,8 @@ class CorrelationService:
                     email_body=email_body,
                     raw_content=raw_content,
                 )
-                if matched_id:
-                    return matched_id
+                if correlated:
+                    return correlated
 
         waiting_disputes = (
             await self.dispute_repo.find_waiting_customer_disputes_by_email(
@@ -510,7 +513,7 @@ class CorrelationService:
             for category in inferred_categories:
                 for dispute in waiting_disputes:
                     if self.categories_compatible(dispute.dispute_category, category):
-                        await self._attach_inbound_communication(
+                        comm_id = await self._attach_inbound_communication(
                             matched_dispute=dispute,
                             customer_email=customer_email,
                             email_subject=email_subject,
@@ -518,10 +521,10 @@ class CorrelationService:
                             raw_content=raw_content,
                         )
                         await self._reopen_if_waiting_customer(dispute)
-                        return dispute.id
+                        return CorrelatedInbound(dispute.id, comm_id)
             if len(waiting_disputes) == 1:
                 dispute = waiting_disputes[0]
-                await self._attach_inbound_communication(
+                comm_id = await self._attach_inbound_communication(
                     matched_dispute=dispute,
                     customer_email=customer_email,
                     email_subject=email_subject,
@@ -529,6 +532,6 @@ class CorrelationService:
                     raw_content=raw_content,
                 )
                 await self._reopen_if_waiting_customer(dispute)
-                return dispute.id
+                return CorrelatedInbound(dispute.id, comm_id)
 
         return None

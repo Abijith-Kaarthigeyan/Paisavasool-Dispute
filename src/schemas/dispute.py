@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -138,3 +139,8 @@ class ReviewQueueResolveRequest(BaseModel):
 
 class DisputeEscalateRequest(BaseModel):
     comments: str | None = None
+
+
+class DisputeCloseRequest(BaseModel):
+    resolution_outcome: Literal["CUSTOMER_CORRECT", "COMPANY_CORRECT"]
+    comments: str = Field(..., min_length=1)

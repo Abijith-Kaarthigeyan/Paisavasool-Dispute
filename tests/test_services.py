@@ -343,7 +343,7 @@ async def test_correlation_engine(db_session: AsyncSession):
     )
 
     # Match check on TAX (collapses to AMENDMENT)
-    matched_id = await correlation_service.correlate_dispute(
+    correlated = await correlation_service.correlate_dispute(
         invoice_number="INV-5000",
         raw_category="TAX",
         customer_email="customer@example.com",
@@ -351,7 +351,8 @@ async def test_correlation_engine(db_session: AsyncSession):
         email_body="Tax is wrong.",
     )
 
-    assert matched_id == dispute.id
+    assert correlated is not None
+    assert correlated.dispute_id == dispute.id
 
     # Verify communication was attached
     comms = await comm_repo.get_communications_for_dispute(dispute.id)
@@ -389,7 +390,7 @@ async def test_correlation_waiting_customer_reply_across_payment_categories(
         status="WAITING_CUSTOMER",
     )
 
-    matched_id = await correlation_service.correlate_dispute(
+    correlated = await correlation_service.correlate_dispute(
         invoice_number="2599",
         raw_category="PAYMENT_NOT_REFLECTED",
         customer_email="customer@example.com",
@@ -397,7 +398,8 @@ async def test_correlation_waiting_customer_reply_across_payment_categories(
         email_body="UTR for invoice 2599 is HDFCNEFT2026070251782. the payment is not reflected",
     )
 
-    assert matched_id == dispute.id
+    assert correlated is not None
+    assert correlated.dispute_id == dispute.id
 
     comments = await comment_repo.list_comments_for_dispute(dispute.id)
     customer_comments = [
@@ -446,7 +448,7 @@ async def test_correlation_prefers_payment_dispute_over_amendment_for_utr_email(
         status="OPEN",
     )
 
-    matched_id = await correlation_service.find_correlated_dispute_for_intake(
+    correlated = await correlation_service.find_correlated_dispute_for_intake(
         invoices=[
             {
                 "invoice_number": "INV-2599",
@@ -461,8 +463,9 @@ async def test_correlation_prefers_payment_dispute_over_amendment_for_utr_email(
         ),
     )
 
-    assert matched_id == payment_dispute.id
-    assert matched_id != amendment_dispute.id
+    assert correlated is not None
+    assert correlated.dispute_id == payment_dispute.id
+    assert correlated.dispute_id != amendment_dispute.id
 
 
 @pytest.mark.asyncio
@@ -495,14 +498,15 @@ async def test_correlation_intake_by_customer_email_waiting_customer(
         status="WAITING_CUSTOMER",
     )
 
-    matched_id = await correlation_service.find_correlated_dispute_for_intake(
+    correlated = await correlation_service.find_correlated_dispute_for_intake(
         invoices=[],
         customer_email="customer@example.com",
         email_subject="Re: Additional payment details",
         email_body="Here is the UTR: HDFCNEFT2026070251782",
     )
 
-    assert matched_id == dispute.id
+    assert correlated is not None
+    assert correlated.dispute_id == dispute.id
     await db_session.refresh(dispute)
     assert dispute.status == "OPEN"
 
@@ -544,7 +548,7 @@ async def test_correlation_intake_by_gmail_thread_without_invoice_number(
     )
     await db_session.commit()
 
-    matched_id = await correlation_service.find_correlated_dispute_for_intake(
+    correlated = await correlation_service.find_correlated_dispute_for_intake(
         invoices=[],
         customer_email="customer@example.com",
         email_subject="Re: Additional documents",
@@ -554,7 +558,8 @@ async def test_correlation_intake_by_gmail_thread_without_invoice_number(
         email_references="<original-msg@gmail.com>",
     )
 
-    assert matched_id == dispute.id
+    assert correlated is not None
+    assert correlated.dispute_id == dispute.id
     await db_session.refresh(dispute)
     assert dispute.status == "OPEN"
 

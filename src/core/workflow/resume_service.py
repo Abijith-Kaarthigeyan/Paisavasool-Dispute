@@ -5,7 +5,9 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.core.exceptions.business_exceptions import ValidationException
 from src.core.workflow.graph import get_graph
+from src.data.repositories.dispute_repository import DisputeRepository
 
 
 class DisputeResumeService:
@@ -31,7 +33,17 @@ class DisputeResumeService:
 
         Returns:
             The final state dict of the execution.
+
+        Raises:
+            ValidationException: If the dispute is already closed.
         """
+        dispute_repo = DisputeRepository(db)
+        dispute = await dispute_repo.get_by_id(dispute_id)
+        if dispute and dispute.status == "CLOSED":
+            raise ValidationException(
+                f"Cannot resume workflow for dispute {dispute_id} in status CLOSED."
+            )
+
         config = {
             "configurable": {
                 "thread_id": str(dispute_id),

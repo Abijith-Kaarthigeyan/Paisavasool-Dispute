@@ -14,10 +14,13 @@ from src.core.services.assignment_service import AssignmentService
 from src.core.services.audit_service import AuditService
 from src.core.services.conversation_history_service import ConversationHistoryService
 from src.core.services.correlation_service import CorrelationService
+from src.core.services.dispute_close_service import DisputeCloseService
+from src.core.services.escalation_service import EscalationService
 from src.core.services.internal_team_config_service import InternalTeamConfigService
 from src.core.services.outbound_email_service import OutboundEmailService
 from src.core.services.recommendation_service import RecommendationService
 from src.core.services.sla_service import SLAService
+from src.core.services.workflow_context_service import WorkflowContextService
 from src.core.workflow.amendment_agent import AmendmentResolutionAgent
 from src.core.workflow.checkpointer import DbWorkflowCheckpointer
 from src.core.workflow.evidence_service import EvidenceSnapshotService
@@ -30,6 +33,7 @@ from src.data.repositories.assignment_repository import AssignmentRepository
 from src.data.repositories.case_repository import CaseRepository
 from src.data.repositories.communication_repository import CommunicationRepository
 from src.data.repositories.dispute_repository import DisputeRepository
+from src.data.repositories.escalation_repository import EscalationRepository
 from src.data.repositories.internal_team_contact_repository import (
     InternalTeamContactRepository,
 )
@@ -43,6 +47,7 @@ from src.data.repositories.recommendation_repository import RecommendationReposi
 from src.data.repositories.review_queue_repository import ReviewQueueRepository
 from src.data.repositories.sla_repository import SLARepository
 from src.data.repositories.user_repository import UserRepository
+from src.data.repositories.workflow_context_repository import WorkflowContextRepository
 from src.observability.logging.logger import logger
 
 PAYMENT_DISPUTE_CATEGORIES = frozenset(
@@ -66,6 +71,27 @@ def _outbound_email_service(db: Any) -> OutboundEmailService:
         comm_repo=CommunicationRepository(db),
         case_repo=CaseRepository(db),
         audit_service=AuditService(activity_repo),
+    )
+
+
+def _dispute_close_service(db: Any) -> DisputeCloseService:
+    activity_repo = ActivityRepository(db)
+    audit_service = AuditService(activity_repo)
+    dispute_repo = DisputeRepository(db)
+    sla_repo = SLARepository(db)
+    escalation_repo = EscalationRepository(db)
+    context_repo = WorkflowContextRepository(db)
+    return DisputeCloseService(
+        dispute_repo=dispute_repo,
+        sla_repo=sla_repo,
+        audit_service=audit_service,
+        ar_client=ARServiceClient(),
+        escalation_service=EscalationService(
+            escalation_repo, sla_repo, dispute_repo, audit_service
+        ),
+        workflow_context_service=WorkflowContextService(context_repo, audit_service),
+        workflow_context_repo=context_repo,
+        comment_repo=CommentRepository(db),
     )
 
 
@@ -190,10 +216,10 @@ async def _persist_inbound_customer_email(
     customer_email: str,
     email_subject: str,
     email_body: str,
-) -> None:
+) -> UUID | None:
     """Stores the original customer email on the dispute if not already recorded."""
     if not (email_subject or "").strip() and not (email_body or "").strip():
-        return
+        return None
 
     comm_repo = CommunicationRepository(db)
     comms = await comm_repo.get_communications_for_dispute(dispute_id)
@@ -206,7 +232,7 @@ async def _persist_inbound_customer_email(
         for c in comms
     )
     if already_recorded:
-        return
+        return None
 
     comm = await comm_repo.create_communication(
         dispute_id=dispute_id,
@@ -216,12 +242,16 @@ async def _persist_inbound_customer_email(
         communication_type="CUSTOMER",
     )
 
-    from src.infrastructure.celery.tasks import generate_associate_draft_task
+    return comm.id
 
-    generate_associate_draft_task.apply_async(
-        args=[str(dispute_id), str(comm.id)],
-        countdown=3,
-    )
+
+def _associate_draft_metadata(
+    dispute_id: UUID, source_communication_id: UUID
+) -> dict[str, str]:
+    return {
+        "dispute_id": str(dispute_id),
+        "source_communication_id": str(source_communication_id),
+    }
 
 
 async def _notify_customer_need_more_info(
@@ -435,7 +465,7 @@ async def pre_correlation_node(
         case_repo=case_repo,
     )
 
-    matched_id = await correlation_service.find_correlated_dispute_for_intake(
+    correlated = await correlation_service.find_correlated_dispute_for_intake(
         invoices=state.get("invoices") or [],
         customer_email=state.get("customer_email") or "",
         email_subject=state.get("email_subject") or "",
@@ -446,13 +476,16 @@ async def pre_correlation_node(
         email_references=state.get("email_references"),
     )
 
-    if matched_id:
+    if correlated:
         logger.info(
             "Pre-correlation matched existing dispute %s. Skipping dispute generation.",
-            matched_id,
+            correlated.dispute_id,
         )
         metadata = dict(state.get("metadata") or {})
-        metadata["resume_dispute_id"] = str(matched_id)
+        metadata["resume_dispute_id"] = str(correlated.dispute_id)
+        metadata["associate_draft"] = _associate_draft_metadata(
+            correlated.dispute_id, correlated.source_communication_id
+        )
         return {
             "workflow_status": "CORRELATED_EXISTING",
             "current_node": "pre_correlation_node",
@@ -633,7 +666,7 @@ async def correlation_node(
         audit_service=audit_service,
     )
 
-    matched_id = await correlation_service.correlate_dispute(
+    correlated = await correlation_service.correlate_dispute(
         invoice_number=state.get("invoice_number"),
         raw_category=state.get("dispute_category"),
         customer_email=state.get("customer_email"),
@@ -642,16 +675,16 @@ async def correlation_node(
         exclude_dispute_id=dispute_id,
     )
 
-    if matched_id and matched_id != dispute_id:
+    if correlated and correlated.dispute_id != dispute_id:
         logger.info(
             "Correlated to existing active dispute: %s. Cancelling this workflow.",
-            matched_id,
+            correlated.dispute_id,
         )
         # Update current dispute to duplicate/cancelled
         dispute = await dispute_repo.get_by_id(dispute_id)
         if dispute:
             dispute.status = "CANCELLED"
-            dispute.resolution_outcome = f"DUPLICATE_OF_{matched_id}"
+            dispute.resolution_outcome = f"DUPLICATE_OF_{correlated.dispute_id}"
             await dispute_repo.update_dispute(dispute)
 
             # Log cancel event
@@ -666,25 +699,34 @@ async def correlation_node(
             )
 
         metadata = dict(state.get("metadata") or {})
-        metadata["resume_dispute_id"] = str(matched_id)
+        metadata["resume_dispute_id"] = str(correlated.dispute_id)
+        metadata["associate_draft"] = _associate_draft_metadata(
+            correlated.dispute_id, correlated.source_communication_id
+        )
         return {
             "workflow_status": "CANCELLED_DUPLICATE",
-            "resolution_outcome": f"DUPLICATE_OF_{matched_id}",
+            "resolution_outcome": f"DUPLICATE_OF_{correlated.dispute_id}",
             "current_node": "correlation_node",
             "metadata": metadata,
         }
 
     logger.info("[Node End] correlation_node - Verified as NEW_DISPUTE")
-    await _persist_inbound_customer_email(
+    source_communication_id = await _persist_inbound_customer_email(
         db=db,
         dispute_id=dispute_id,
         customer_email=state.get("customer_email") or "",
         email_subject=state.get("email_subject") or "",
         email_body=state.get("email_body") or "",
     )
+    metadata = dict(state.get("metadata") or {})
+    if source_communication_id:
+        metadata["associate_draft"] = _associate_draft_metadata(
+            dispute_id, source_communication_id
+        )
     return {
         "workflow_status": "NEW_DISPUTE",
         "current_node": "correlation_node",
+        "metadata": metadata,
     }
 
 
@@ -1535,50 +1577,11 @@ async def close_dispute_node(
         logger.info("[Node End] close_dispute_node - Bypassed for NEED_MORE_INFO")
         return {}
 
-    # Map the outcome string to the canonical database outcomes
-    canonical_outcome = outcome
-    if outcome in ["APPROVE", "SETTLEMENT_DONE", "ACKNOWLEDGED", "CUSTOMER_CORRECT"]:
-        canonical_outcome = "CUSTOMER_CORRECT"
-    elif outcome in ["REJECT", "SETTLEMENT_NOT_DONE", "REJECTED", "COMPANY_CORRECT"]:
-        canonical_outcome = "COMPANY_CORRECT"
-
-    dispute.resolution_outcome = canonical_outcome
-    old_status = dispute.status
-    dispute.status = "CLOSED"
-
-    now = datetime.now(UTC)
-    dispute.resolved_at = now
-    dispute.closed_at = now
-    await dispute_repo.update_dispute(dispute)
-
-    activity_repo = ActivityRepository(db)
-    audit_service = AuditService(activity_repo)
-
-    # Stop SLA monitoring and record final progress
-    sla_service = SLAService(SLARepository(db), dispute_repo, audit_service, settings)
-    await sla_service.handle_status_change(dispute.id, old_status, "CLOSED")
-    await sla_service.calculate_progress(dispute.id)
-
-    # Call AR Service to resume collections
-    ar_client = ARServiceClient()
-    try:
-        await ar_client.resume_collections(dispute.invoice_id)
-    except Exception as e:
-        logger.error("Failed to resume collections in AR service: %s", str(e))
-
-    await audit_service.log_event(
-        dispute_id=dispute_id,
-        action="STATUS_CHANGED",
-        metadata={
-            "old_status": old_status,
-            "new_status": "CLOSED",
-            "outcome": canonical_outcome,
-        },
-    )
-    await audit_service.log_event(
-        dispute_id=dispute_id,
-        action="CLOSED",
-        metadata={"outcome": canonical_outcome},
+    close_service = _dispute_close_service(db)
+    canonical_outcome = await close_service.execute_dispute_close(
+        dispute,
+        outcome,
+        close_reason="AUTOMATED",
     )
 
     return {

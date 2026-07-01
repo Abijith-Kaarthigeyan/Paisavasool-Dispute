@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from src.api.dependencies import (
     get_associate_communication_service,
+    get_dispute_close_service,
     get_dispute_decision_service,
     get_dispute_service,
     get_dispute_workflow_service,
@@ -13,6 +14,7 @@ from src.core.security.dependencies import require_finance
 from src.core.services.associate_communication_service import (
     AssociateCommunicationService,
 )
+from src.core.services.dispute_close_service import DisputeCloseService
 from src.core.services.dispute_decision_service import DisputeDecisionService
 from src.core.services.dispute_service import DisputeService
 from src.core.services.dispute_workflow_service import DisputeWorkflowService
@@ -23,6 +25,7 @@ from src.schemas.dispute import (
     AssociateCommunicationDraftResponse,
     AssociateCommunicationSendRequest,
     DisputeActivityResponse,
+    DisputeCloseRequest,
     DisputeCommentCreate,
     DisputeCommentResponse,
     DisputeCommunicationResponse,
@@ -309,3 +312,20 @@ async def escalate_dispute_manually(
         reason=payload.comments,
     )
     return {"status": "SUCCESS", "message": "Dispute manually escalated to manager."}
+
+
+@router.post("/{id}/close", response_model=DisputeResponse)
+async def close_dispute_manually(
+    id: UUID,
+    payload: DisputeCloseRequest,
+    current_user: TokenPayload = Depends(require_finance),
+    close_service: DisputeCloseService = Depends(get_dispute_close_service),
+):
+    """Manually closes a dispute without completing the automated workflow."""
+    dispute = await close_service.manual_close(
+        id,
+        resolution_outcome=payload.resolution_outcome,
+        comments=payload.comments,
+        performed_by=current_user.sub,
+    )
+    return DisputeResponse.model_validate(dispute)
