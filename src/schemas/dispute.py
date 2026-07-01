@@ -142,5 +142,6 @@ class DisputeEscalateRequest(BaseModel):
 
 
 class DisputeCloseRequest(BaseModel):
+    resolution_method: Literal["PHONE", "IN_PERSON", "EMAIL", "OTHER"]
     resolution_outcome: Literal["CUSTOMER_CORRECT", "COMPANY_CORRECT"]
     comments: str = Field(..., min_length=1)

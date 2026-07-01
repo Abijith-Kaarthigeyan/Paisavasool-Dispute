@@ -324,6 +324,7 @@ async def close_dispute_manually(
     """Manually closes a dispute without completing the automated workflow."""
     dispute = await close_service.manual_close(
         id,
+        resolution_method=payload.resolution_method,
         resolution_outcome=payload.resolution_outcome,
         comments=payload.comments,
         performed_by=current_user.sub,

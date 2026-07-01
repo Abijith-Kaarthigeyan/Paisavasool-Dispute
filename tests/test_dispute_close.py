@@ -123,6 +123,7 @@ async def test_manual_close_from_allowed_statuses(
 
     result = await close_service.manual_close(
         dispute.id,
+        resolution_method="PHONE",
         resolution_outcome="CUSTOMER_CORRECT",
         comments="Resolved by phone call.",
         performed_by=performed_by,
@@ -144,12 +145,41 @@ async def test_manual_close_from_allowed_statuses(
 
 
 @pytest.mark.asyncio
+async def test_manual_close_stores_resolution_method_in_audit_and_comment(
+    db_session: AsyncSession,
+):
+    close_service = _build_close_service(db_session)
+    dispute, _ = await _seed_dispute(db_session, status="OPEN")
+    performed_by = uuid4()
+
+    await close_service.manual_close(
+        dispute.id,
+        resolution_method="PHONE",
+        resolution_outcome="CUSTOMER_CORRECT",
+        comments="Agreed on credit note.",
+        performed_by=performed_by,
+    )
+
+    activity_repo = ActivityRepository(db_session)
+    activities = await activity_repo.list_activities_for_dispute(dispute.id)
+    manual_close = next(a for a in activities if a.activity_type == "MANUAL_CLOSE")
+    assert manual_close.activity_metadata["resolution_method"] == "PHONE"
+    assert manual_close.activity_metadata["outcome"] == "CUSTOMER_CORRECT"
+
+    comment_repo = CommentRepository(db_session)
+    comments = await comment_repo.list_comments_for_dispute(dispute.id)
+    assert any("phone call" in c.comment.lower() for c in comments)
+    assert any("Customer correct" in c.comment for c in comments)
+
+
+@pytest.mark.asyncio
 async def test_manual_close_idempotent_when_already_closed(db_session: AsyncSession):
     close_service = _build_close_service(db_session)
     dispute, _ = await _seed_dispute(db_session, status="CLOSED")
 
     result = await close_service.manual_close(
         dispute.id,
+        resolution_method="EMAIL",
         resolution_outcome="COMPANY_CORRECT",
         comments="Should be ignored.",
         performed_by=uuid4(),
@@ -172,6 +202,7 @@ async def test_manual_close_rejects_terminal_statuses(
     ):
         await close_service.manual_close(
             dispute.id,
+            resolution_method="PHONE",
             resolution_outcome="CUSTOMER_CORRECT",
             comments="Should fail.",
             performed_by=uuid4(),
@@ -185,6 +216,7 @@ async def test_resume_blocked_after_manual_close(db_session: AsyncSession):
 
     await close_service.manual_close(
         dispute.id,
+        resolution_method="IN_PERSON",
         resolution_outcome="COMPANY_CORRECT",
         comments="Closed offline.",
         performed_by=uuid4(),
@@ -207,6 +239,7 @@ async def test_decision_blocked_after_manual_close(db_session: AsyncSession):
 
     await close_service.manual_close(
         dispute.id,
+        resolution_method="OTHER",
         resolution_outcome="CUSTOMER_CORRECT",
         comments="Closed offline.",
         performed_by=uuid4(),
@@ -244,6 +277,7 @@ async def test_close_dispute_api_endpoint(
     app.dependency_overrides[get_current_user] = lambda: MOCK_ASSOCIATE
 
     payload = {
+        "resolution_method": "PHONE",
         "resolution_outcome": "CUSTOMER_CORRECT",
         "comments": "Customer confirmed payment over the phone.",
     }
@@ -266,6 +300,7 @@ async def test_close_dispute_api_idempotent(
     app.dependency_overrides[get_current_user] = lambda: MOCK_ASSOCIATE
 
     payload = {
+        "resolution_method": "EMAIL",
         "resolution_outcome": "COMPANY_CORRECT",
         "comments": "Second close attempt.",
     }
@@ -286,6 +321,7 @@ async def test_close_dispute_api_rejects_failed(
     app.dependency_overrides[get_current_user] = lambda: MOCK_ASSOCIATE
 
     payload = {
+        "resolution_method": "PHONE",
         "resolution_outcome": "CUSTOMER_CORRECT",
         "comments": "Should not close.",
     }
@@ -307,6 +343,7 @@ async def test_associate_decision_api_blocked_after_close(
     close_resp = await mock_client.post(
         f"/api/v1/disputes/{dispute.id}/close",
         json={
+            "resolution_method": "IN_PERSON",
             "resolution_outcome": "COMPANY_CORRECT",
             "comments": "Manual resolution.",
         },

@@ -19,6 +19,19 @@ from src.observability.logging.logger import logger
 
 TERMINAL_REJECT_STATUSES = frozenset({"FAILED", "CANCELLED"})
 ALLOWED_MANUAL_OUTCOMES = frozenset({"CUSTOMER_CORRECT", "COMPANY_CORRECT"})
+ALLOWED_RESOLUTION_METHODS = frozenset({"PHONE", "IN_PERSON", "EMAIL", "OTHER"})
+
+RESOLUTION_METHOD_LABELS = {
+    "PHONE": "phone call",
+    "IN_PERSON": "in-person discussion",
+    "EMAIL": "email conversation",
+    "OTHER": "mutual agreement outside paisavasool",
+}
+
+OUTCOME_LABELS = {
+    "CUSTOMER_CORRECT": "Customer correct",
+    "COMPANY_CORRECT": "Company correct",
+}
 
 
 def canonical_resolution_outcome(outcome: str | None) -> str | None:
@@ -58,6 +71,7 @@ class DisputeCloseService:
         *,
         performed_by: UUID | None = None,
         close_reason: str | None = None,
+        resolution_method: str | None = None,
     ) -> str | None:
         """Applies close side effects: status, SLA, AR resume, escalations, audit."""
         canonical_outcome = canonical_resolution_outcome(outcome)
@@ -93,6 +107,9 @@ class DisputeCloseService:
         if close_reason:
             status_metadata["close_reason"] = close_reason
             closed_metadata["close_reason"] = close_reason
+        if resolution_method:
+            status_metadata["resolution_method"] = resolution_method
+            closed_metadata["resolution_method"] = resolution_method
 
         await self.audit_service.log_event(
             dispute_id=dispute.id,
@@ -113,6 +130,7 @@ class DisputeCloseService:
         self,
         dispute_id: UUID,
         *,
+        resolution_method: str,
         resolution_outcome: str,
         comments: str,
         performed_by: UUID,
@@ -130,15 +148,23 @@ class DisputeCloseService:
                 f"Cannot close dispute in status {dispute.status}."
             )
 
+        normalized_method = resolution_method.upper()
+        if normalized_method not in ALLOWED_RESOLUTION_METHODS:
+            raise ValidationException(
+                "resolution_method must be PHONE, IN_PERSON, EMAIL, or OTHER."
+            )
+
         normalized_outcome = resolution_outcome.upper()
         if normalized_outcome not in ALLOWED_MANUAL_OUTCOMES:
             raise ValidationException(
                 "resolution_outcome must be CUSTOMER_CORRECT or COMPANY_CORRECT."
             )
 
+        method_label = RESOLUTION_METHOD_LABELS[normalized_method]
+        outcome_label = OUTCOME_LABELS[normalized_outcome]
         await self.comment_repo.create_comment(
             dispute_id=dispute_id,
-            comment=f"Manual close: {comments}",
+            comment=(f"Manual close via {method_label} — {outcome_label}: {comments}"),
             comment_type="INTERNAL",
             created_by=performed_by,
         )
@@ -147,6 +173,7 @@ class DisputeCloseService:
             action="MANUAL_CLOSE",
             performed_by=performed_by,
             metadata={
+                "resolution_method": normalized_method,
                 "outcome": normalized_outcome,
                 "comments": comments,
             },
@@ -157,6 +184,7 @@ class DisputeCloseService:
             normalized_outcome,
             performed_by=performed_by,
             close_reason="MANUAL",
+            resolution_method=normalized_method,
         )
 
         context = await self.workflow_context_repo.get_by_dispute_id(dispute_id)
@@ -165,6 +193,7 @@ class DisputeCloseService:
                 **(context.workflow_state or {}),
                 "workflow_status": "CLOSED",
                 "manual_close": True,
+                "resolution_method": normalized_method,
                 "resolution_outcome": canonical_outcome,
             }
             await self.workflow_context_service.update_node(
