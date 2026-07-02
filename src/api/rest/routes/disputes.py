@@ -283,6 +283,7 @@ async def send_associate_communication(
             }
             for att in payload.attachments
         ],
+        pause_sla_till_reply=payload.pause_sla_till_reply,
     )
     return DisputeCommunicationResponse.model_validate(comm)
 

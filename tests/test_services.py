@@ -5,11 +5,16 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.config.settings import settings
+from src.core.exceptions.business_exceptions import ValidationException
 from src.core.services.assignment_service import AssignmentService
 from src.core.services.audit_service import AuditService
 from src.core.services.correlation_service import CorrelationService
 from src.core.services.escalation_service import EscalationService
-from src.core.services.sla_service import SLAService
+from src.core.services.sla_service import (
+    PAUSE_REASON_AWAITING_CUSTOMER_REPLY,
+    PAUSE_REASON_WAITING_CUSTOMER,
+    SLAService,
+)
 from src.core.workflow.triage_agent import DisputeTriageAgent
 from src.data.repositories import (
     ActivityRepository,
@@ -96,6 +101,7 @@ async def test_sla_pause_and_resume(db_session: AsyncSession):
     await sla_service.handle_status_change(dispute.id, "OPEN", "WAITING_CUSTOMER")
     await db_session.refresh(sla)
     assert sla.is_paused is True
+    assert sla.pause_reason == PAUSE_REASON_WAITING_CUSTOMER
     assert sla.paused_at is not None
 
     # Simulate passing of time in pause (mock paused_at to be 30 minutes ago)
@@ -106,6 +112,7 @@ async def test_sla_pause_and_resume(db_session: AsyncSession):
     await sla_service.handle_status_change(dispute.id, "WAITING_CUSTOMER", "IN_REVIEW")
     await db_session.refresh(sla)
     assert sla.is_paused is False
+    assert sla.pause_reason is None
     assert sla.paused_at is None
     assert sla.accumulated_paused_minutes >= 30.0
 
@@ -695,8 +702,8 @@ async def test_conversation_history_includes_original_and_follow_up(
     await db_session.commit()
 
     dispute = await dispute_repo.get_by_id(dispute.id)
-    history = await ConversationHistoryService.build_customer_conversation_text(
-        db_session,
+    history_service = ConversationHistoryService(comm_repo, comment_repo)
+    history = await history_service.build_customer_conversation_text(
         dispute.id,
         dispute,
     )
@@ -905,3 +912,212 @@ async def test_communication_response_schema_maps_frontend_fields(
     assert response.message_body == "Please provide your UTR number."
     assert response.sent_time == comm.created_at
     assert response.communication_type == "CUSTOMER"
+    assert response.pause_sla_till_reply is False
+
+
+PAUSE_SLA_TILL_REPLY_STATUSES = [
+    "WAITING_ASSOCIATE_APPROVAL",
+    "WAITING_INTERNAL_TEAM",
+    "WAITING_PAYMENT_REVIEW",
+]
+
+
+async def _create_dispute_with_sla(
+    db_session: AsyncSession,
+    *,
+    status: str = "OPEN",
+    dispute_category: str = "PAYMENT_ALREADY_DONE",
+):
+    case_repo = CaseRepository(db_session)
+    dispute_repo = DisputeRepository(db_session)
+    sla_repo = SLARepository(db_session)
+    activity_repo = ActivityRepository(db_session)
+    comm_repo = CommunicationRepository(db_session)
+
+    audit_service = AuditService(activity_repo)
+    sla_service = SLAService(sla_repo, dispute_repo, audit_service, settings)
+
+    case = await case_repo.create_case(
+        case_number=f"CASE-{uuid4().hex[:6].upper()}",
+        customer_email="customer@example.com",
+    )
+    dispute = await dispute_repo.create_dispute(
+        dispute_number=f"DISP-{uuid4().hex[:6].upper()}",
+        case_id=case.id,
+        invoice_id=uuid4(),
+        invoice_number=f"INV-{uuid4().hex[:4].upper()}",
+        customer_id=uuid4(),
+        dispute_category=dispute_category,
+        status=status,
+    )
+    sla = await sla_service.create_sla(dispute.id)
+    return dispute, sla, sla_service, comm_repo
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("waiting_status", PAUSE_SLA_TILL_REPLY_STATUSES)
+async def test_pause_for_customer_reply_in_waiting_states(
+    db_session: AsyncSession, waiting_status: str
+):
+    dispute, sla, sla_service, comm_repo = await _create_dispute_with_sla(
+        db_session, status=waiting_status
+    )
+    comm = await comm_repo.create_communication(
+        dispute_id=dispute.id,
+        recipient="customer@example.com",
+        subject="Need more info",
+        body="Please reply with details.",
+        communication_type="ASSOCIATE_OUTBOUND",
+        pause_sla_till_reply=True,
+    )
+
+    await sla_service.pause_for_customer_reply(dispute.id, comm.id)
+    await db_session.refresh(sla)
+
+    assert sla.is_paused is True
+    assert sla.pause_reason == PAUSE_REASON_AWAITING_CUSTOMER_REPLY
+    assert sla.paused_at is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("waiting_status", PAUSE_SLA_TILL_REPLY_STATUSES)
+async def test_sla_keeps_running_without_pause_till_reply(
+    db_session: AsyncSession, waiting_status: str
+):
+    dispute, sla, sla_service, _comm_repo = await _create_dispute_with_sla(
+        db_session, status=waiting_status
+    )
+
+    await sla_service.calculate_progress(dispute.id)
+    await db_session.refresh(sla)
+
+    assert sla.is_paused is False
+    assert sla.pause_reason is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("waiting_status", PAUSE_SLA_TILL_REPLY_STATUSES)
+async def test_calculate_progress_does_not_resume_awaiting_customer_reply_pause(
+    db_session: AsyncSession, waiting_status: str
+):
+    dispute, sla, sla_service, comm_repo = await _create_dispute_with_sla(
+        db_session, status=waiting_status
+    )
+    comm = await comm_repo.create_communication(
+        dispute_id=dispute.id,
+        recipient="customer@example.com",
+        subject="Need more info",
+        body="Please reply.",
+        communication_type="ASSOCIATE_OUTBOUND",
+        pause_sla_till_reply=True,
+    )
+
+    await sla_service.pause_for_customer_reply(dispute.id, comm.id)
+    await sla_service.calculate_progress(dispute.id)
+    await db_session.refresh(sla)
+
+    assert sla.is_paused is True
+    assert sla.pause_reason == PAUSE_REASON_AWAITING_CUSTOMER_REPLY
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("waiting_status", PAUSE_SLA_TILL_REPLY_STATUSES)
+async def test_resume_on_customer_reply_after_associate_pause(
+    db_session: AsyncSession, waiting_status: str
+):
+    dispute, sla, sla_service, comm_repo = await _create_dispute_with_sla(
+        db_session, status=waiting_status
+    )
+    outbound = await comm_repo.create_communication(
+        dispute_id=dispute.id,
+        recipient="customer@example.com",
+        subject="Need more info",
+        body="Please reply.",
+        communication_type="ASSOCIATE_OUTBOUND",
+        pause_sla_till_reply=True,
+    )
+
+    await sla_service.pause_for_customer_reply(dispute.id, outbound.id)
+    sla.paused_at = datetime.now(UTC) - timedelta(minutes=20)
+    await sla_service.sla_repo.update_sla(sla)
+
+    await sla_service.resume_on_customer_reply(dispute.id)
+    await db_session.refresh(sla)
+
+    assert sla.is_paused is False
+    assert sla.pause_reason is None
+    assert sla.accumulated_paused_minutes >= 20.0
+
+
+@pytest.mark.asyncio
+async def test_pause_for_customer_reply_rejected_in_open_status(
+    db_session: AsyncSession,
+):
+    dispute, _sla, sla_service, comm_repo = await _create_dispute_with_sla(
+        db_session, status="OPEN"
+    )
+    comm = await comm_repo.create_communication(
+        dispute_id=dispute.id,
+        recipient="customer@example.com",
+        subject="Need more info",
+        body="Please reply.",
+        communication_type="ASSOCIATE_OUTBOUND",
+        pause_sla_till_reply=True,
+    )
+
+    with pytest.raises(ValidationException, match="waiting states"):
+        await sla_service.pause_for_customer_reply(dispute.id, comm.id)
+
+
+@pytest.mark.asyncio
+async def test_resume_on_customer_reply_ignored_for_waiting_customer_pause(
+    db_session: AsyncSession,
+):
+    dispute, sla, sla_service, _comm_repo = await _create_dispute_with_sla(
+        db_session, status="WAITING_CUSTOMER"
+    )
+
+    await sla_service.handle_status_change(dispute.id, "OPEN", "WAITING_CUSTOMER")
+    await db_session.refresh(sla)
+    assert sla.pause_reason == PAUSE_REASON_WAITING_CUSTOMER
+
+    await sla_service.resume_on_customer_reply(dispute.id)
+    await db_session.refresh(sla)
+
+    assert sla.is_paused is True
+    assert sla.pause_reason == PAUSE_REASON_WAITING_CUSTOMER
+
+
+@pytest.mark.asyncio
+async def test_second_pause_for_customer_reply_is_noop(db_session: AsyncSession):
+    dispute, sla, sla_service, comm_repo = await _create_dispute_with_sla(
+        db_session, status="WAITING_ASSOCIATE_APPROVAL"
+    )
+    first_comm = await comm_repo.create_communication(
+        dispute_id=dispute.id,
+        recipient="customer@example.com",
+        subject="First email",
+        body="Please reply.",
+        communication_type="ASSOCIATE_OUTBOUND",
+        pause_sla_till_reply=True,
+    )
+    second_comm = await comm_repo.create_communication(
+        dispute_id=dispute.id,
+        recipient="customer@example.com",
+        subject="Second email",
+        body="Following up.",
+        communication_type="ASSOCIATE_OUTBOUND",
+        pause_sla_till_reply=True,
+    )
+
+    await sla_service.pause_for_customer_reply(dispute.id, first_comm.id)
+    first_paused_at = sla.paused_at
+
+    await sla_service.pause_for_customer_reply(dispute.id, second_comm.id)
+    await db_session.refresh(sla)
+
+    assert sla.is_paused is True
+    assert first_paused_at is not None
+    assert sla.paused_at is not None
+    # SQLite may strip tzinfo; compare wall-clock time only.
+    assert sla.paused_at.replace(tzinfo=None) == first_paused_at.replace(tzinfo=None)

@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.11-slim-bookworm
 
 # Copy uv binary from the official image (pin to a stable version to avoid latest checks)
 COPY --from=ghcr.io/astral-sh/uv:0.5.21 /uv /uvx /bin/

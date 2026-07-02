@@ -9,6 +9,7 @@ from src.core.exceptions.business_exceptions import ValidationException
 from src.core.services.audit_service import AuditService
 from src.core.services.conversation_history_service import ConversationHistoryService
 from src.core.services.outbound_email_service import OutboundEmailService
+from src.core.services.sla_service import PAUSE_SLA_TILL_REPLY_STATUSES, SLAService
 from src.core.workflow.mail_agent import DisputeMailAgent
 from src.data.clients.ar_service_client import ARServiceClient
 from src.data.models.postgres.communication_draft import DisputeCommunicationDraft
@@ -106,6 +107,7 @@ class AssociateCommunicationService:
         conversation_history_service: ConversationHistoryService,
         ar_client: ARServiceClient,
         outbound_email_service: OutboundEmailService,
+        sla_service: SLAService,
     ):
         self.comm_repo = comm_repo
         self.draft_repo = draft_repo
@@ -116,6 +118,7 @@ class AssociateCommunicationService:
         self.conversation_history_service = conversation_history_service
         self.ar_client = ar_client
         self.outbound_email_service = outbound_email_service
+        self.sla_service = sla_service
 
     async def _resolve_customer_email(self, dispute: Any) -> str:
         case = getattr(dispute, "case", None)
@@ -274,12 +277,17 @@ class AssociateCommunicationService:
         body: str,
         sent_by: UUID,
         attachments: list[dict[str, str]] | None = None,
+        pause_sla_till_reply: bool = False,
     ) -> Any:
         """Persists an associate-authored outbound email to the dispute thread."""
         if not subject.strip() or not body.strip():
             raise ValidationException("Subject and body are required.")
         if not recipient.strip():
             raise ValidationException("Recipient is required.")
+        if pause_sla_till_reply and dispute.status not in PAUSE_SLA_TILL_REPLY_STATUSES:
+            raise ValidationException(
+                "SLA can only be paused until customer reply in waiting states."
+            )
 
         validated_attachments = _validate_pdf_attachments(attachments or [])
         persisted_body = _append_attachment_list_to_body(
@@ -293,6 +301,7 @@ class AssociateCommunicationService:
             subject=subject.strip(),
             body=persisted_body,
             communication_type="ASSOCIATE_OUTBOUND",
+            pause_sla_till_reply=pause_sla_till_reply,
         )
 
         await self.audit_service.log_event(
@@ -325,6 +334,9 @@ class AssociateCommunicationService:
             attachments=validated_attachments or None,
             email_body=body.strip(),
         )
+
+        if pause_sla_till_reply:
+            await self.sla_service.pause_for_customer_reply(dispute.id, comm.id)
 
         await self.mark_drafts_sent(dispute.id)
         await self.comm_repo.db.commit()

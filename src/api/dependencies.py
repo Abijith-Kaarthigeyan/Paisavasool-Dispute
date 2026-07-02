@@ -186,6 +186,7 @@ def get_correlation_service(
     comment_repo: CommentRepository = Depends(get_comment_repository),
     case_repo: CaseRepository = Depends(get_case_repository),
     audit_service: AuditService = Depends(get_audit_service),
+    sla_service: SLAService = Depends(get_sla_service),
 ) -> CorrelationService:
     return CorrelationService(
         dispute_repo,
@@ -193,6 +194,7 @@ def get_correlation_service(
         comment_repo,
         audit_service,
         case_repo,
+        sla_service,
     )
 
 
@@ -413,6 +415,7 @@ def get_associate_communication_service(
     ),
     ar_client: ARServiceClient = Depends(get_ar_service_client),
     outbound_email_service: OutboundEmailService = Depends(get_outbound_email_service),
+    sla_service: SLAService = Depends(get_sla_service),
 ) -> AssociateCommunicationService:
     return AssociateCommunicationService(
         comm_repo=comm_repo,
@@ -424,4 +427,5 @@ def get_associate_communication_service(
         conversation_history_service=conversation_history_service,
         ar_client=ar_client,
         outbound_email_service=outbound_email_service,
+        sla_service=sla_service,
     )

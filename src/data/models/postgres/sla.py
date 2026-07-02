@@ -26,6 +26,7 @@ class DisputeSLA(Base):
         DateTime(timezone=True), nullable=True
     )
     is_paused: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    pause_reason: Mapped[str | None] = mapped_column(String(50), nullable=True)
     current_percentage: Mapped[float] = mapped_column(
         Float, default=0.0, nullable=False
     )

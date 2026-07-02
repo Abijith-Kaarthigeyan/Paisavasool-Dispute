@@ -102,6 +102,7 @@ class DisputeCommunicationResponse(BaseModel):
     communication_type: str
     gmail_message_id: str | None = None
     rfc_message_id: str | None = None
+    pause_sla_till_reply: bool = False
     sent_time: datetime = Field(validation_alias="created_at")
     created_at: datetime
 
@@ -130,6 +131,7 @@ class AssociateCommunicationSendRequest(BaseModel):
     subject: str
     body: str
     attachments: list[OutboundEmailAttachment] = Field(default_factory=list)
+    pause_sla_till_reply: bool = False
 
 
 class DisputeDecisionRequest(BaseModel):

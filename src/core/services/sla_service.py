@@ -11,6 +11,15 @@ from src.observability.logging.logger import logger
 
 TERMINAL_DISPUTE_STATUSES = frozenset({"CLOSED", "RESOLVED", "FAILED"})
 WAITING_CUSTOMER_STATUS = "WAITING_CUSTOMER"
+PAUSE_REASON_WAITING_CUSTOMER = "WAITING_CUSTOMER"
+PAUSE_REASON_AWAITING_CUSTOMER_REPLY = "AWAITING_CUSTOMER_REPLY"
+PAUSE_SLA_TILL_REPLY_STATUSES = frozenset(
+    {
+        "WAITING_ASSOCIATE_APPROVAL",
+        "WAITING_INTERNAL_TEAM",
+        "WAITING_PAYMENT_REVIEW",
+    }
+)
 
 
 class SLAService:
@@ -46,19 +55,33 @@ class SLAService:
         return value
 
     async def _pause_sla(
-        self, sla: DisputeSLA, dispute_id: UUID, now: datetime
+        self,
+        sla: DisputeSLA,
+        dispute_id: UUID,
+        now: datetime,
+        pause_reason: str,
+        *,
+        communication_id: UUID | None = None,
     ) -> None:
         if sla.is_paused:
             return
 
         sla.is_paused = True
         sla.paused_at = now
+        sla.pause_reason = pause_reason
         await self.sla_repo.update_sla(sla)
+
+        metadata: dict[str, str] = {
+            "paused_at": now.isoformat(),
+            "reason": pause_reason,
+        }
+        if communication_id is not None:
+            metadata["communication_id"] = str(communication_id)
 
         await self.audit_service.log_event(
             dispute_id=dispute_id,
             action="SLA_PAUSED",
-            metadata={"paused_at": now.isoformat(), "reason": WAITING_CUSTOMER_STATUS},
+            metadata=metadata,
         )
 
     async def _resume_sla(
@@ -72,6 +95,7 @@ class SLAService:
         sla.accumulated_paused_minutes += paused_duration_minutes
         sla.is_paused = False
         sla.paused_at = None
+        sla.pause_reason = None
         sla.resumed_at = now
 
         await self.sla_repo.update_sla(sla)
@@ -91,6 +115,7 @@ class SLAService:
     ) -> None:
         sla.is_paused = False
         sla.paused_at = None
+        sla.pause_reason = None
         sla.status = "CLOSED"
         await self.sla_repo.update_sla(sla)
 
@@ -141,16 +166,16 @@ class SLAService:
         now = datetime.now(UTC)
 
         if new_status in TERMINAL_DISPUTE_STATUSES:
-            if sla.is_paused and old_status == WAITING_CUSTOMER_STATUS:
+            if sla.is_paused:
                 await self._resume_sla(sla, dispute_id, now)
             await self._close_sla(sla, dispute_id, now, f"DISPUTE_{new_status}")
             return
 
         if new_status == WAITING_CUSTOMER_STATUS:
-            await self._pause_sla(sla, dispute_id, now)
+            await self._pause_sla(sla, dispute_id, now, PAUSE_REASON_WAITING_CUSTOMER)
             return
 
-        if sla.is_paused:
+        if sla.is_paused and sla.pause_reason != PAUSE_REASON_AWAITING_CUSTOMER_REPLY:
             await self._resume_sla(sla, dispute_id, now)
 
     async def _sync_pause_with_dispute_status(
@@ -163,11 +188,51 @@ class SLAService:
             return
 
         if dispute_status == WAITING_CUSTOMER_STATUS:
-            await self._pause_sla(sla, dispute_id, now)
+            await self._pause_sla(sla, dispute_id, now, PAUSE_REASON_WAITING_CUSTOMER)
+            return
+
+        if sla.is_paused and sla.pause_reason == PAUSE_REASON_AWAITING_CUSTOMER_REPLY:
             return
 
         if sla.is_paused:
             await self._resume_sla(sla, dispute_id, now)
+
+    async def pause_for_customer_reply(
+        self, dispute_id: UUID, communication_id: UUID
+    ) -> None:
+        """Pause SLA until a correlated customer inbound reply is received."""
+        dispute = await self.dispute_repo.get_by_id(dispute_id)
+        if not dispute:
+            raise ValidationException("Dispute not found.")
+
+        if dispute.status not in PAUSE_SLA_TILL_REPLY_STATUSES:
+            raise ValidationException(
+                "SLA can only be paused until customer reply in waiting states."
+            )
+
+        sla = await self.sla_repo.get_by_dispute_id(dispute_id)
+        if not sla:
+            return
+
+        now = datetime.now(UTC)
+        await self._pause_sla(
+            sla,
+            dispute_id,
+            now,
+            PAUSE_REASON_AWAITING_CUSTOMER_REPLY,
+            communication_id=communication_id,
+        )
+
+    async def resume_on_customer_reply(self, dispute_id: UUID) -> None:
+        """Resume SLA only when paused by associate-initiated customer-reply wait."""
+        sla = await self.sla_repo.get_by_dispute_id(dispute_id)
+        if not sla or not sla.is_paused:
+            return
+        if sla.pause_reason != PAUSE_REASON_AWAITING_CUSTOMER_REPLY:
+            return
+
+        now = datetime.now(UTC)
+        await self._resume_sla(sla, dispute_id, now)
 
     async def calculate_progress(self, dispute_id: UUID) -> DisputeSLA | None:
         """Calculates active time elapsed, percentage of SLA used, and updates breach status."""
@@ -199,6 +264,7 @@ class SLAService:
             elapsed_total_minutes = (end_at - started_at).total_seconds() / 60.0
             sla.is_paused = False
             sla.paused_at = None
+            sla.pause_reason = None
             sla.status = "CLOSED"
         elif sla.is_paused:
             paused_at = self._as_utc(sla.paused_at or now)

@@ -77,6 +77,7 @@ class CommunicationRepository:
         communication_type: str,
         gmail_message_id: str | None = None,
         rfc_message_id: str | None = None,
+        pause_sla_till_reply: bool = False,
     ) -> DisputeCommunication:
         comm = DisputeCommunication(
             dispute_id=dispute_id,
@@ -86,6 +87,7 @@ class CommunicationRepository:
             communication_type=communication_type,
             gmail_message_id=gmail_message_id,
             rfc_message_id=rfc_message_id,
+            pause_sla_till_reply=pause_sla_till_reply,
             created_at=datetime.now(),
         )
         self.db.add(comm)

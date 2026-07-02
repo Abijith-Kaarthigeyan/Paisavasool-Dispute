@@ -456,6 +456,7 @@ async def pre_correlation_node(
     case_repo = CaseRepository(db)
     activity_repo = ActivityRepository(db)
     audit_service = AuditService(activity_repo)
+    sla_service = SLAService(SLARepository(db), dispute_repo, audit_service, settings)
 
     correlation_service = CorrelationService(
         dispute_repo=dispute_repo,
@@ -463,6 +464,7 @@ async def pre_correlation_node(
         comment_repo=comment_repo,
         audit_service=audit_service,
         case_repo=case_repo,
+        sla_service=sla_service,
     )
 
     correlated = await correlation_service.find_correlated_dispute_for_intake(
@@ -658,12 +660,14 @@ async def correlation_node(
     comment_repo = CommentRepository(db)
     activity_repo = ActivityRepository(db)
     audit_service = AuditService(activity_repo)
+    sla_service = SLAService(SLARepository(db), dispute_repo, audit_service, settings)
 
     correlation_service = CorrelationService(
         dispute_repo=dispute_repo,
         communication_repo=comm_repo,
         comment_repo=comment_repo,
         audit_service=audit_service,
+        sla_service=sla_service,
     )
 
     correlated = await correlation_service.correlate_dispute(

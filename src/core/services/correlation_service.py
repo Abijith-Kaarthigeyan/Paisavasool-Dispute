@@ -4,6 +4,7 @@ from uuid import UUID
 
 from src.core.services.audit_service import AuditService
 from src.core.services.email_thread_utils import extract_reference_tokens
+from src.core.services.sla_service import SLAService
 from src.core.workflow.triage_agent import DisputeTriageAgent
 from src.data.repositories.case_repository import CaseRepository
 from src.data.repositories.communication_repository import CommunicationRepository
@@ -52,12 +53,14 @@ class CorrelationService:
         comment_repo: CommentRepository,
         audit_service: AuditService,
         case_repo: CaseRepository | None = None,
+        sla_service: SLAService | None = None,
     ):
         self.dispute_repo = dispute_repo
         self.communication_repo = communication_repo
         self.comment_repo = comment_repo
         self.audit_service = audit_service
         self.case_repo = case_repo
+        self.sla_service = sla_service
 
     def collapse_category(self, category: str) -> str:
         """Collapses granular dispute categories into AMENDMENT or leaves them independent."""
@@ -248,6 +251,9 @@ class CorrelationService:
             performed_by=created_by,
             metadata={"comment_id": str(comm.id), "source": "correlation"},
         )
+
+        if self.sla_service:
+            await self.sla_service.resume_on_customer_reply(matched_dispute.id)
 
         return comm.id
 
