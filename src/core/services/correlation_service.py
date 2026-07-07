@@ -204,6 +204,31 @@ class CorrelationService:
             if inv.get("invoice_number")
         ]
 
+    def _triage_invoice_numbers(self, invoices: list[dict]) -> set[str]:
+        """Normalized invoice numbers explicitly identified by triage."""
+        return {
+            DisputeTriageAgent.normalize_invoice_number(inv.get("invoice_number", ""))
+            for inv in invoices
+            if inv.get("invoice_number")
+        }
+
+    def _candidate_invoice_numbers(self, candidates: list) -> set[str]:
+        return {
+            DisputeTriageAgent.normalize_invoice_number(dispute.invoice_number or "")
+            for dispute in candidates
+            if dispute.invoice_number
+        }
+
+    def _triage_targets_unmatched_invoices(
+        self, triage_invoices: list[dict], candidates: list
+    ) -> bool:
+        """True when triage names invoice(s) that none of the candidate disputes cover."""
+        triage_nums = self._triage_invoice_numbers(triage_invoices)
+        if not triage_nums:
+            return False
+        candidate_nums = self._candidate_invoice_numbers(candidates)
+        return not triage_nums.intersection(candidate_nums)
+
     async def _reopen_if_waiting_customer(self, dispute) -> None:
         if dispute and dispute.status == "WAITING_CUSTOMER":
             dispute.status = "OPEN"
@@ -276,6 +301,7 @@ class CorrelationService:
         cases: list,
         inferred_categories: list[str],
         customer_email: str,
+        triage_invoices: list[dict] | None = None,
     ):
         candidates: list = []
         for case in cases:
@@ -287,6 +313,10 @@ class CorrelationService:
             matched = self._select_best_match(candidates, category)
             if matched:
                 return matched
+
+        # Broad fallbacks only when triage did not name invoices unrelated to candidates.
+        if self._triage_targets_unmatched_invoices(triage_invoices or [], candidates):
+            return None
 
         waiting = [
             dispute for dispute in candidates if dispute.status == "WAITING_CUSTOMER"
@@ -320,6 +350,7 @@ class CorrelationService:
         email_body: str,
         raw_content: str | None,
         inferred_categories: list[str],
+        triage_invoices: list[dict] | None = None,
     ) -> CorrelatedInbound | None:
         if not self.case_repo:
             return None
@@ -327,7 +358,10 @@ class CorrelationService:
         if gmail_thread_id:
             cases = await self.case_repo.find_by_gmail_thread_id(gmail_thread_id)
             matched_dispute = self._pick_dispute_from_cases(
-                cases, inferred_categories, customer_email
+                cases,
+                inferred_categories,
+                customer_email,
+                triage_invoices=triage_invoices,
             )
             if matched_dispute:
                 comm_id = await self._attach_inbound_communication(
@@ -345,7 +379,10 @@ class CorrelationService:
             case = await self.case_repo.find_by_message_token(token)
             if case:
                 matched_dispute = self._pick_dispute_from_cases(
-                    [case], inferred_categories, customer_email
+                    [case],
+                    inferred_categories,
+                    customer_email,
+                    triage_invoices=triage_invoices,
                 )
                 if matched_dispute:
                     comm_id = await self._attach_inbound_communication(
@@ -448,6 +485,7 @@ class CorrelationService:
             email_body=email_body,
             raw_content=raw_content,
             inferred_categories=inferred_categories,
+            triage_invoices=invoices,
         )
         if thread_match:
             return thread_match
@@ -516,6 +554,19 @@ class CorrelationService:
             )
         )
         if waiting_disputes:
+            triage_nums = self._triage_invoice_numbers(invoices)
+            if triage_nums:
+                waiting_disputes = [
+                    dispute
+                    for dispute in waiting_disputes
+                    if DisputeTriageAgent.normalize_invoice_number(
+                        dispute.invoice_number or ""
+                    )
+                    in triage_nums
+                ]
+            if not waiting_disputes:
+                return None
+
             for category in inferred_categories:
                 for dispute in waiting_disputes:
                     if self.categories_compatible(dispute.dispute_category, category):
@@ -528,7 +579,7 @@ class CorrelationService:
                         )
                         await self._reopen_if_waiting_customer(dispute)
                         return CorrelatedInbound(dispute.id, comm_id)
-            if len(waiting_disputes) == 1:
+            if len(waiting_disputes) == 1 and not triage_nums:
                 dispute = waiting_disputes[0]
                 comm_id = await self._attach_inbound_communication(
                     matched_dispute=dispute,

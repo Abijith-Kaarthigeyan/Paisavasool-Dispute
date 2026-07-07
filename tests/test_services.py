@@ -572,6 +572,61 @@ async def test_correlation_intake_by_gmail_thread_without_invoice_number(
 
 
 @pytest.mark.asyncio
+async def test_correlation_intake_does_not_attach_new_invoice_to_unrelated_waiting_dispute(
+    db_session: AsyncSession,
+):
+    """A new invoice/issue in the same thread must create a dispute, not resume another invoice."""
+    case_repo = CaseRepository(db_session)
+    dispute_repo = DisputeRepository(db_session)
+    comm_repo = CommunicationRepository(db_session)
+    comment_repo = CommentRepository(db_session)
+    activity_repo = ActivityRepository(db_session)
+
+    audit_service = AuditService(activity_repo)
+    correlation_service = CorrelationService(
+        dispute_repo,
+        comm_repo,
+        comment_repo,
+        audit_service,
+        case_repo,
+    )
+
+    customer_email = "starkindustriestony0@gmail.com"
+    case = await case_repo.create_case(
+        case_number=f"CASE-{uuid4().hex[:6].upper()}",
+        customer_email=customer_email,
+        gmail_thread_id="gmail-thread-late-delivery",
+        email_subject="Wrong due date",
+        email_body="Due date on invoice 4502 is wrong.",
+    )
+    await dispute_repo.create_dispute(
+        dispute_number=f"DISP-{uuid4().hex[:6].upper()}",
+        case_id=case.id,
+        invoice_id=uuid4(),
+        invoice_number="INV-4502",
+        customer_id=uuid4(),
+        dispute_category="AMENDMENT",
+        status="WAITING_CUSTOMER",
+    )
+    await db_session.commit()
+
+    correlated = await correlation_service.find_correlated_dispute_for_intake(
+        invoices=[
+            {
+                "invoice_number": "INV-4503",
+                "dispute_types": ["LATE_DELIVERY"],
+            }
+        ],
+        customer_email=customer_email,
+        email_subject="late delivery",
+        email_body="Late deivery for invoice 4503",
+        gmail_thread_id="gmail-thread-late-delivery",
+    )
+
+    assert correlated is None
+
+
+@pytest.mark.asyncio
 async def test_pre_correlation_node_skips_dispute_generation(
     db_session: AsyncSession,
 ):

@@ -5,6 +5,7 @@ from src.data.models.postgres.case import DisputeCase
 from src.data.models.postgres.dispute import Dispute
 from src.data.repositories.case_repository import CaseRepository
 from src.data.repositories.dispute_repository import DisputeRepository
+from src.schemas.auth import RoleName
 
 
 class CaseService:
@@ -29,3 +30,11 @@ class CaseService:
 
     async def list_disputes_for_case(self, case_id: UUID) -> list[Dispute]:
         return await self.dispute_repo.list_disputes_by_case_id(case_id)
+
+    async def list_disputes_for_case_for_user(
+        self, case_id: UUID, role: RoleName, user_id: UUID
+    ) -> list[Dispute]:
+        disputes = await self.list_disputes_for_case(case_id)
+        if role == RoleName.FINANCE_ASSOCIATE:
+            return [d for d in disputes if d.assigned_to == user_id]
+        return disputes

@@ -10,7 +10,7 @@ from src.api.dependencies import (
     get_dispute_workflow_service,
     get_escalation_service,
 )
-from src.core.security.dependencies import require_finance
+from src.core.security.dependencies import require_finance, require_roles
 from src.core.services.associate_communication_service import (
     AssociateCommunicationService,
 )
@@ -19,7 +19,7 @@ from src.core.services.dispute_decision_service import DisputeDecisionService
 from src.core.services.dispute_service import DisputeService
 from src.core.services.dispute_workflow_service import DisputeWorkflowService
 from src.core.services.escalation_service import EscalationService
-from src.schemas.auth import TokenPayload
+from src.schemas.auth import RoleName, TokenPayload
 from src.schemas.dispute import (
     AssociateCommunicationDraftRequest,
     AssociateCommunicationDraftResponse,
@@ -36,6 +36,10 @@ from src.schemas.dispute import (
 
 router = APIRouter(prefix="/disputes", tags=["Dispute Lifecycle"])
 
+require_finance_or_manager = require_roles(
+    [RoleName.FINANCE_ASSOCIATE, RoleName.FINANCE_MANAGER]
+)
+
 
 @router.get("", response_model=list[DisputeResponse])
 async def list_disputes(
@@ -47,12 +51,24 @@ async def list_disputes(
     dispute_service: DisputeService = Depends(get_dispute_service),
 ):
     """Retrieves a paginated list of disputes with optional filters."""
-    disputes = await dispute_service.list_disputes(
+    disputes = await dispute_service.list_disputes_for_user(
+        role=current_user.role,
+        user_id=current_user.sub,
         customer_id=customer_id,
         status=status,
         limit=limit,
         offset=offset,
     )
+    return [DisputeResponse.model_validate(d) for d in disputes]
+
+
+@router.get("/assigned/me", response_model=list[DisputeResponse])
+async def get_my_assigned_disputes(
+    current_user: TokenPayload = Depends(require_finance_or_manager),
+    dispute_service: DisputeService = Depends(get_dispute_service),
+):
+    """List disputes assigned to the authenticated user."""
+    disputes = await dispute_service.list_assigned_disputes(current_user.sub)
     return [DisputeResponse.model_validate(d) for d in disputes]
 
 
@@ -63,7 +79,9 @@ async def get_dispute(
     dispute_service: DisputeService = Depends(get_dispute_service),
 ):
     """Fetches details of a specific dispute by ID."""
-    dispute = await dispute_service.get_dispute(id)
+    dispute = await dispute_service.get_dispute_for_user(
+        id, current_user.role, current_user.sub
+    )
     return DisputeResponse.model_validate(dispute)
 
 
@@ -74,6 +92,7 @@ async def get_dispute_activities(
     dispute_service: DisputeService = Depends(get_dispute_service),
 ):
     """Fetches all activities associated with a dispute."""
+    await dispute_service.get_dispute_for_user(id, current_user.role, current_user.sub)
     activities = await dispute_service.list_activities(id)
     return [DisputeActivityResponse.model_validate(a) for a in activities]
 
@@ -85,6 +104,7 @@ async def get_dispute_comments(
     dispute_service: DisputeService = Depends(get_dispute_service),
 ):
     """Fetches all comments associated with a dispute."""
+    await dispute_service.get_dispute_for_user(id, current_user.role, current_user.sub)
     comments = await dispute_service.list_comments(id)
     return [DisputeCommentResponse.model_validate(c) for c in comments]
 
@@ -97,6 +117,7 @@ async def create_dispute_comment(
     dispute_service: DisputeService = Depends(get_dispute_service),
 ):
     """Creates a new comment for a dispute."""
+    await dispute_service.get_dispute_for_user(id, current_user.role, current_user.sub)
     comment = await dispute_service.create_comment(
         dispute_id=id,
         comment=payload.comment,
@@ -110,9 +131,11 @@ async def create_dispute_comment(
 async def interrupt_dispute_workflow(
     id: UUID,
     current_user: TokenPayload = Depends(require_finance),
+    dispute_service: DisputeService = Depends(get_dispute_service),
     workflow_service: DisputeWorkflowService = Depends(get_dispute_workflow_service),
 ):
     """Manually interrupts/pauses the dispute workflow execution."""
+    await dispute_service.get_dispute_for_user(id, current_user.role, current_user.sub)
     return await workflow_service.interrupt_workflow(id, performed_by=current_user.sub)
 
 
@@ -120,9 +143,11 @@ async def interrupt_dispute_workflow(
 async def resume_dispute_workflow(
     id: UUID,
     current_user: TokenPayload = Depends(require_finance),
+    dispute_service: DisputeService = Depends(get_dispute_service),
     workflow_service: DisputeWorkflowService = Depends(get_dispute_workflow_service),
 ):
     """Resumes execution of the dispute workflow from the last checkpoint."""
+    await dispute_service.get_dispute_for_user(id, current_user.role, current_user.sub)
     return await workflow_service.resume_workflow(id)
 
 
@@ -131,9 +156,11 @@ async def submit_associate_decision(
     id: UUID,
     payload: DisputeDecisionRequest,
     current_user: TokenPayload = Depends(require_finance),
+    dispute_service: DisputeService = Depends(get_dispute_service),
     decision_service: DisputeDecisionService = Depends(get_dispute_decision_service),
 ):
     """Submits Associate Approval (APPROVE/REJECT/EDIT_AND_APPLY) and resumes the workflow."""
+    await dispute_service.get_dispute_for_user(id, current_user.role, current_user.sub)
     return await decision_service.submit_associate_decision(
         id,
         decision=payload.decision,
@@ -148,9 +175,11 @@ async def submit_payment_review_decision(
     id: UUID,
     payload: DisputeDecisionRequest,
     current_user: TokenPayload = Depends(require_finance),
+    dispute_service: DisputeService = Depends(get_dispute_service),
     decision_service: DisputeDecisionService = Depends(get_dispute_decision_service),
 ):
     """Submits Payment Review decision and resumes the workflow."""
+    await dispute_service.get_dispute_for_user(id, current_user.role, current_user.sub)
     return await decision_service.submit_payment_review_decision(
         id,
         decision=payload.decision,
@@ -164,9 +193,11 @@ async def submit_operational_review_decision(
     id: UUID,
     payload: DisputeDecisionRequest,
     current_user: TokenPayload = Depends(require_finance),
+    dispute_service: DisputeService = Depends(get_dispute_service),
     decision_service: DisputeDecisionService = Depends(get_dispute_decision_service),
 ):
     """Submits Operational Review decision and resumes the workflow."""
+    await dispute_service.get_dispute_for_user(id, current_user.role, current_user.sub)
     return await decision_service.submit_operational_review_decision(
         id,
         decision=payload.decision,
@@ -182,6 +213,7 @@ async def get_dispute_workflow_context(
     dispute_service: DisputeService = Depends(get_dispute_service),
 ):
     """Fetches the workflow context for a dispute."""
+    await dispute_service.get_dispute_for_user(id, current_user.role, current_user.sub)
     return await dispute_service.get_workflow_context(id)
 
 
@@ -192,6 +224,7 @@ async def get_dispute_communications(
     dispute_service: DisputeService = Depends(get_dispute_service),
 ):
     """Fetches communications history for a dispute."""
+    await dispute_service.get_dispute_for_user(id, current_user.role, current_user.sub)
     comms = await dispute_service.list_communications(id)
     return [DisputeCommunicationResponse.model_validate(c) for c in comms]
 
@@ -209,7 +242,7 @@ async def get_latest_associate_communication_draft(
     ),
 ):
     """Returns the latest active associate reply draft (GENERATING or READY)."""
-    await dispute_service.get_dispute(id)
+    await dispute_service.get_dispute_for_user(id, current_user.role, current_user.sub)
     draft = await comm_service.get_latest_draft(id)
     if not draft:
         raise HTTPException(status_code=404, detail="No active draft found.")
@@ -237,7 +270,9 @@ async def draft_associate_communication(
     ),
 ):
     """Generates an AI-assisted email draft for associate review."""
-    dispute = await dispute_service.get_dispute(id)
+    dispute = await dispute_service.get_dispute_for_user(
+        id, current_user.role, current_user.sub
+    )
     draft = await comm_service.generate_and_persist_draft(
         dispute,
         trigger="MANUAL_REGENERATE",
@@ -268,7 +303,9 @@ async def send_associate_communication(
     ),
 ):
     """Persists an associate-authored outbound email on the dispute thread."""
-    dispute = await dispute_service.get_dispute(id)
+    dispute = await dispute_service.get_dispute_for_user(
+        id, current_user.role, current_user.sub
+    )
     comm = await comm_service.send_email(
         dispute,
         recipient=payload.recipient,
@@ -295,6 +332,7 @@ async def get_dispute_evidence(
     dispute_service: DisputeService = Depends(get_dispute_service),
 ):
     """Fetches evidence snapshots for a dispute."""
+    await dispute_service.get_dispute_for_user(id, current_user.role, current_user.sub)
     return await dispute_service.list_evidence_snapshots(id)
 
 
@@ -305,6 +343,7 @@ async def get_dispute_sla(
     dispute_service: DisputeService = Depends(get_dispute_service),
 ):
     """Fetches SLA details for a dispute."""
+    await dispute_service.get_dispute_for_user(id, current_user.role, current_user.sub)
     return await dispute_service.get_sla(id)
 
 
@@ -313,9 +352,11 @@ async def escalate_dispute_manually(
     id: UUID,
     payload: DisputeEscalateRequest,
     current_user: TokenPayload = Depends(require_finance),
+    dispute_service: DisputeService = Depends(get_dispute_service),
     escalation_service: EscalationService = Depends(get_escalation_service),
 ):
     """Manually escalates a dispute to the manager."""
+    await dispute_service.get_dispute_for_user(id, current_user.role, current_user.sub)
     await escalation_service.escalate_to_manager_manually(
         dispute_id=id,
         reason=payload.comments,
@@ -328,9 +369,11 @@ async def close_dispute_manually(
     id: UUID,
     payload: DisputeCloseRequest,
     current_user: TokenPayload = Depends(require_finance),
+    dispute_service: DisputeService = Depends(get_dispute_service),
     close_service: DisputeCloseService = Depends(get_dispute_close_service),
 ):
     """Manually closes a dispute without completing the automated workflow."""
+    await dispute_service.get_dispute_for_user(id, current_user.role, current_user.sub)
     dispute = await close_service.manual_close(
         id,
         resolution_method=payload.resolution_method,

@@ -143,6 +143,85 @@ async def test_get_disputes_endpoint(mock_client: AsyncClient, seed_api_data):
 
 
 @pytest.mark.asyncio
+async def test_get_disputes_endpoint_associate_only_assigned(
+    mock_client: AsyncClient, db_session, seed_api_data, seed_users
+):
+    """Verify finance associate only receives disputes assigned to them."""
+    from src.data.repositories import DisputeRepository
+
+    dispute_repo = DisputeRepository(db_session)
+    other_case = await dispute_repo.create_dispute(
+        dispute_number="DISP-API-OTHER",
+        case_id=seed_api_data["case"].id,
+        invoice_id=seed_api_data["dispute"].invoice_id,
+        invoice_number="INV-API-OTHER",
+        customer_id=seed_api_data["dispute"].customer_id,
+        dispute_category="AMENDMENT",
+        status="OPEN",
+        assigned_to=seed_users["manager"].id,
+        manager_id=seed_users["manager"].id,
+    )
+    await db_session.commit()
+
+    app.dependency_overrides[get_current_user] = lambda: MOCK_ASSOCIATE
+
+    resp = await mock_client.get(
+        "/api/v1/disputes", headers={"Authorization": "Bearer dummy"}
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    dispute_ids = {item["id"] for item in data}
+    assert str(seed_api_data["dispute"].id) in dispute_ids
+    assert str(other_case.id) not in dispute_ids
+    assert all(item["assigned_to"] == str(MOCK_ASSOCIATE.sub) for item in data)
+
+
+@pytest.mark.asyncio
+async def test_get_dispute_by_id_endpoint_forbidden_for_other_associate(
+    mock_client: AsyncClient, db_session, seed_api_data, seed_users
+):
+    from src.data.repositories import DisputeRepository
+
+    dispute_repo = DisputeRepository(db_session)
+    other_dispute = await dispute_repo.create_dispute(
+        dispute_number="DISP-API-FORBIDDEN",
+        case_id=seed_api_data["case"].id,
+        invoice_id=seed_api_data["dispute"].invoice_id,
+        invoice_number="INV-API-FORBIDDEN",
+        customer_id=seed_api_data["dispute"].customer_id,
+        dispute_category="AMENDMENT",
+        status="OPEN",
+        assigned_to=seed_users["manager"].id,
+        manager_id=seed_users["manager"].id,
+    )
+    await db_session.commit()
+
+    app.dependency_overrides[get_current_user] = lambda: MOCK_ASSOCIATE
+
+    resp = await mock_client.get(
+        f"/api/v1/disputes/{other_dispute.id}",
+        headers={"Authorization": "Bearer dummy"},
+    )
+    assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_get_my_assigned_disputes_endpoint(
+    mock_client: AsyncClient, seed_api_data
+):
+    app.dependency_overrides[get_current_user] = lambda: MOCK_ASSOCIATE
+
+    resp = await mock_client.get(
+        "/api/v1/disputes/assigned/me",
+        headers={"Authorization": "Bearer dummy"},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data) >= 1
+    assert data[0]["assigned_to"] == str(MOCK_ASSOCIATE.sub)
+
+
+@pytest.mark.asyncio
 async def test_get_dispute_by_id_endpoint(mock_client: AsyncClient, seed_api_data):
     app.dependency_overrides[get_current_user] = lambda: MOCK_ASSOCIATE
     dispute_id = seed_api_data["dispute"].id

@@ -2,6 +2,7 @@ from uuid import UUID
 
 from src.core.exceptions.business_exceptions import (
     DisputeNotFoundException,
+    ForbiddenException,
     SLADetailsNotFoundException,
 )
 from src.core.services.workflow_context_service import WorkflowContextService
@@ -20,6 +21,7 @@ from src.data.repositories.other_repositories import (
     EvidenceSnapshotRepository,
 )
 from src.data.repositories.sla_repository import SLARepository
+from src.schemas.auth import RoleName
 
 
 class DisputeService:
@@ -56,10 +58,51 @@ class DisputeService:
             offset=offset,
         )
 
+    async def list_disputes_for_user(
+        self,
+        *,
+        role: RoleName,
+        user_id: UUID,
+        customer_id: UUID | None = None,
+        status: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[Dispute]:
+        if role == RoleName.FINANCE_ASSOCIATE:
+            return await self.dispute_repo.list_by_assigned_associate(
+                user_id,
+                customer_id=customer_id,
+                status=status,
+                limit=limit,
+                offset=offset,
+            )
+        return await self.list_disputes(
+            customer_id=customer_id,
+            status=status,
+            limit=limit,
+            offset=offset,
+        )
+
+    async def list_assigned_disputes(self, user_id: UUID) -> list[Dispute]:
+        return await self.dispute_repo.list_by_assigned_associate(user_id)
+
+    def verify_associate_access(
+        self, dispute: Dispute, role: RoleName, user_id: UUID
+    ) -> None:
+        if role == RoleName.FINANCE_ASSOCIATE and dispute.assigned_to != user_id:
+            raise ForbiddenException("Access to this dispute is denied.")
+
     async def get_dispute(self, dispute_id: UUID) -> Dispute:
         dispute = await self.dispute_repo.get_by_id(dispute_id)
         if not dispute:
             raise DisputeNotFoundException(f"Dispute {dispute_id} not found.")
+        return dispute
+
+    async def get_dispute_for_user(
+        self, dispute_id: UUID, role: RoleName, user_id: UUID
+    ) -> Dispute:
+        dispute = await self.get_dispute(dispute_id)
+        self.verify_associate_access(dispute, role, user_id)
         return dispute
 
     async def list_activities(self, dispute_id: UUID) -> list[DisputeActivity]:

@@ -20,8 +20,12 @@ async def list_review_queue(
     review_queue_service: ReviewQueueService = Depends(get_review_queue_service),
 ):
     """Retrieves the current dispute review queue items."""
-    items = await review_queue_service.list_review_queue(
-        status=status, limit=limit, offset=offset
+    items = await review_queue_service.list_review_queue_for_user(
+        role=current_user.role,
+        user_id=current_user.sub,
+        status=status,
+        limit=limit,
+        offset=offset,
     )
     return [ReviewQueueResponse.model_validate(i) for i in items]
 
@@ -40,4 +44,5 @@ async def resolve_review_queue_item(
         dispute_category=payload.dispute_category,
         comments=payload.comments,
         performed_by=current_user.sub,
+        role=current_user.role,
     )

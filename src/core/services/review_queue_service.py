@@ -3,6 +3,7 @@ from uuid import UUID
 
 from src.core.exceptions.business_exceptions import (
     DisputeNotFoundException,
+    ForbiddenException,
     ReviewQueueItemNotFoundException,
 )
 from src.core.workflow.resume_service import DisputeResumeService
@@ -15,6 +16,7 @@ from src.data.repositories.other_repositories import (
     CommentRepository,
 )
 from src.data.repositories.review_queue_repository import ReviewQueueRepository
+from src.schemas.auth import RoleName
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +51,28 @@ class ReviewQueueService:
             offset=offset,
         )
 
+    async def list_review_queue_for_user(
+        self,
+        *,
+        role: RoleName,
+        user_id: UUID,
+        status: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[DisputeReviewQueue]:
+        if role == RoleName.FINANCE_ASSOCIATE:
+            return await self.review_repo.list_review_queue_for_associate(
+                user_id,
+                status=status,
+                limit=limit,
+                offset=offset,
+            )
+        return await self.list_review_queue(
+            status=status,
+            limit=limit,
+            offset=offset,
+        )
+
     async def resolve_item(
         self,
         item_id: UUID,
@@ -57,6 +81,7 @@ class ReviewQueueService:
         dispute_category: str,
         comments: str | None,
         performed_by: UUID,
+        role: RoleName,
     ) -> dict[str, str]:
         db = self.review_repo.db
         item = await self.review_repo.get_by_id(item_id)
@@ -68,6 +93,8 @@ class ReviewQueueService:
         dispute = await self.dispute_repo.get_by_id(item.dispute_id)
         if not dispute:
             raise DisputeNotFoundException(f"Dispute {item.dispute_id} not found.")
+        if role == RoleName.FINANCE_ASSOCIATE and dispute.assigned_to != performed_by:
+            raise ForbiddenException("Access to this dispute is denied.")
 
         item.status = "RESOLVED"
         await self.review_repo.update_review_queue_item(item)

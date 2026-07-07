@@ -95,6 +95,29 @@ class DisputeRepository:
         result = await self.db.execute(query)
         return list(result.scalars().all())
 
+    async def list_by_assigned_associate(
+        self,
+        associate_id: UUID,
+        *,
+        customer_id: UUID | None = None,
+        status: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[Dispute]:
+        """List disputes assigned to a specific finance associate."""
+        query = select(Dispute).where(
+            Dispute.assigned_to == associate_id,
+            Dispute.is_deleted.is_(False),
+        )
+        if customer_id:
+            query = query.where(Dispute.customer_id == customer_id)
+        if status:
+            query = query.where(Dispute.status == status)
+
+        query = query.order_by(Dispute.created_at.desc()).limit(limit).offset(offset)
+        result = await self.db.execute(query)
+        return list(result.scalars().all())
+
     async def create_dispute(
         self,
         *,

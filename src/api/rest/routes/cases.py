@@ -51,7 +51,9 @@ async def get_case_disputes(
     case_service: CaseService = Depends(get_case_service),
 ):
     """Retrieves all disputes associated with a specific case."""
-    disputes = await case_service.list_disputes_for_case(id)
+    disputes = await case_service.list_disputes_for_case_for_user(
+        id, current_user.role, current_user.sub
+    )
     return [DisputeResponse.model_validate(d) for d in disputes]
 
 
