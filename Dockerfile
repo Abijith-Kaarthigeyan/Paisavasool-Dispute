@@ -22,4 +22,5 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev
 
 EXPOSE 8002
-CMD ["/bin/sh", "-c", "/app/.venv/bin/alembic upgrade head && /app/.venv/bin/uvicorn main:app --host 0.0.0.0 --port 8002"]
+RUN sed -i 's/\r$//' /app/scripts/*.sh && chmod +x /app/scripts/*.sh
+CMD ["/app/scripts/start_api.sh"]

@@ -1,14 +1,12 @@
 import base64
-import shutil
-from pathlib import Path
 from uuid import UUID, uuid4
 
-from src.core.config.settings import settings
 from src.core.exceptions.business_exceptions import (
     CaseAttachmentNotFoundException,
     CaseNotFoundException,
     ValidationException,
 )
+from src.core.storage.attachment_storage import get_attachment_storage
 from src.data.models.postgres.case_attachment import CaseAttachment
 from src.data.repositories.case_attachment_repository import CaseAttachmentRepository
 from src.data.repositories.case_repository import CaseRepository
@@ -24,12 +22,7 @@ class CaseAttachmentService:
     ):
         self.case_repo = case_repo
         self.attachment_repo = attachment_repo
-
-    def _storage_root(self) -> Path:
-        return Path(settings.CASE_ATTACHMENT_STORAGE_DIR)
-
-    def _resolve_disk_path(self, relative_path: str) -> Path:
-        return self._storage_root() / relative_path
+        self._storage = get_attachment_storage()
 
     async def persist_attachments(
         self,
@@ -39,13 +32,9 @@ class CaseAttachmentService:
         if not attachments:
             return []
 
-        case_dir = self._storage_root() / str(case_id)
-        case_dir.mkdir(parents=True, exist_ok=True)
-
         saved: list[CaseAttachment] = []
         for attachment in attachments:
             relative_path = f"{case_id}/{uuid4()}_{attachment.filename}"
-            destination = self._resolve_disk_path(relative_path)
 
             if attachment.content_base64:
                 try:
@@ -54,14 +43,16 @@ class CaseAttachmentService:
                     raise ValidationException(
                         f"Invalid base64 content for attachment {attachment.filename}"
                     ) from exc
-                destination.write_bytes(file_bytes)
+                self._storage.write_bytes(relative_path, file_bytes)
             elif attachment.storage_path:
+                from pathlib import Path
+
                 source = Path(attachment.storage_path)
                 if not source.is_file():
                     raise ValidationException(
                         f"Attachment source file not found: {attachment.storage_path}"
                     )
-                shutil.copy2(source, destination)
+                self._storage.write_bytes(relative_path, source.read_bytes())
             else:
                 raise ValidationException(
                     f"Attachment {attachment.filename} requires content_base64 or storage_path"
@@ -103,15 +94,11 @@ class CaseAttachmentService:
         existing = await self.attachment_repo.list_by_case_id(target_case_id)
         existing_filenames = {attachment.filename for attachment in existing}
 
-        target_dir = self._storage_root() / str(target_case_id)
-        target_dir.mkdir(parents=True, exist_ok=True)
-
         for attachment in source_attachments:
             if attachment.filename in existing_filenames:
                 continue
 
-            source_path = self._resolve_disk_path(attachment.file_path)
-            if not source_path.is_file():
+            if not self._storage.exists(attachment.file_path):
                 logger.warning(
                     "Skipping attachment merge for missing file: %s",
                     attachment.file_path,
@@ -119,8 +106,7 @@ class CaseAttachmentService:
                 continue
 
             relative_path = f"{target_case_id}/{uuid4()}_{attachment.filename}"
-            destination = self._resolve_disk_path(relative_path)
-            shutil.copy2(source_path, destination)
+            self._storage.copy(attachment.file_path, relative_path)
             await self.attachment_repo.create_attachment(
                 case_id=target_case_id,
                 filename=attachment.filename,
@@ -133,16 +119,15 @@ class CaseAttachmentService:
 
     async def get_attachment_file(
         self, case_id: UUID, attachment_id: UUID
-    ) -> tuple[Path, CaseAttachment]:
+    ) -> tuple[bytes, CaseAttachment]:
         attachment = await self.attachment_repo.get_by_id(attachment_id)
         if not attachment or attachment.case_id != case_id:
             raise CaseAttachmentNotFoundException(
                 f"Attachment {attachment_id} not found for case {case_id}."
             )
 
-        disk_path = self._resolve_disk_path(attachment.file_path)
-        if not disk_path.is_file():
+        if not self._storage.exists(attachment.file_path):
             raise CaseAttachmentNotFoundException(
                 f"Attachment file missing on disk for {attachment_id}."
             )
-        return disk_path, attachment
+        return self._storage.read_bytes(attachment.file_path), attachment

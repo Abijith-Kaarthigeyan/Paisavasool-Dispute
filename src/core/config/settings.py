@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     OPENROUTER_API_KEY: str = ""
 
     CASE_ATTACHMENT_STORAGE_DIR: str = "/data/case-attachments"
+    STORAGE_BACKEND: str = "local"
+    GCS_BUCKET: str = ""
+    GCS_PREFIX: str = "paisavasool/case-attachments"
 
     # SLA Durations (in Hours)
     DISPUTE_SLA_PAYMENT_HOURS: int = 12

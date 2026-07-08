@@ -1,7 +1,7 @@
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import Response
 
 from src.api.dependencies import (
     get_case_attachment_service,
@@ -76,11 +76,11 @@ async def download_case_attachment(
     attachment_service: CaseAttachmentService = Depends(get_case_attachment_service),
 ):
     """Streams a case attachment inline (e.g. PDF in browser)."""
-    disk_path, attachment = await attachment_service.get_attachment_file(
+    content, attachment = await attachment_service.get_attachment_file(
         case_id, attachment_id
     )
-    return FileResponse(
-        disk_path,
+    return Response(
+        content=content,
         media_type=attachment.mime_type,
         headers={"Content-Disposition": f'inline; filename="{attachment.filename}"'},
     )
