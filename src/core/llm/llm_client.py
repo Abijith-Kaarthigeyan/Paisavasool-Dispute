@@ -1,4 +1,4 @@
-"""Shared LLM client: Direct Gemini → Groq → OpenRouter fallback chain."""
+"""Shared LLM client: Direct Gemini → Groq → Groq API 2 → OpenRouter fallback chain."""
 
 import time
 from dataclasses import dataclass
@@ -74,6 +74,15 @@ async def _try_gemini(
         return None
 
 
+def _iter_groq_api_keys() -> list[tuple[str, str]]:
+    keys: list[tuple[str, str]] = []
+    if _key_usable(settings.GROQ_API_KEY):
+        keys.append((settings.GROQ_API_KEY.strip(), "Groq"))
+    if _key_usable(settings.GROQ_API_KEY_2):
+        keys.append((settings.GROQ_API_KEY_2.strip(), "Groq API 2"))
+    return keys
+
+
 async def _try_groq(
     *,
     prompt: str,
@@ -81,14 +90,15 @@ async def _try_groq(
     json_mode: bool,
     agent_label: str,
     timeout: float,
+    api_key: str,
+    provider: str,
 ) -> LLMCompletionResult | None:
-    groq_key = settings.GROQ_API_KEY.strip()
     model = settings.GROQ_MODEL_NAME
     start_time = time.time()
     try:
-        logger.info("Attempting %s with Groq model: %s", agent_label, model)
+        logger.info("Attempting %s with %s model: %s", agent_label, provider, model)
         headers = {
-            "Authorization": f"Bearer {groq_key}",
+            "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
         payload: dict[str, Any] = {
@@ -110,15 +120,17 @@ async def _try_groq(
             content = result_json["choices"][0]["message"]["content"]
 
         latency = time.time() - start_time
-        logger.info("%s succeeded with Groq model: %s", agent_label, model)
+        logger.info("%s succeeded with %s model: %s", agent_label, provider, model)
         return LLMCompletionResult(
             content=content,
             latency=latency,
             model=model,
-            provider="Groq",
+            provider=provider,
         )
     except Exception as e:
-        logger.warning("Groq %s failed with model %s: %s", agent_label, model, str(e))
+        logger.warning(
+            "%s %s failed with model %s: %s", provider, agent_label, model, str(e)
+        )
         return None
 
 
@@ -180,7 +192,7 @@ async def generate_text_completion(
     agent_label: str = "LLM request",
     timeout: float = 15.0,
 ) -> LLMCompletionResult | None:
-    """Run prompt through Gemini → Groq → OpenRouter. Returns None if all providers fail."""
+    """Run prompt through Gemini → Groq → Groq API 2 → OpenRouter. Returns None if all providers fail."""
     if _key_usable(settings.GEMINI_API_KEY):
         result = await _try_gemini(
             prompt=prompt,
@@ -192,13 +204,15 @@ async def generate_text_completion(
         if result:
             return result
 
-    if _key_usable(settings.GROQ_API_KEY):
+    for groq_key, provider in _iter_groq_api_keys():
         result = await _try_groq(
             prompt=prompt,
             temperature=temperature,
             json_mode=json_mode,
             agent_label=agent_label,
             timeout=timeout,
+            api_key=groq_key,
+            provider=provider,
         )
         if result:
             return result

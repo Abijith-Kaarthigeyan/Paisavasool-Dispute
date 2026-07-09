@@ -79,6 +79,44 @@ async def test_llm_client_falls_back_to_groq_when_gemini_fails():
 
 
 @pytest.mark.asyncio
+async def test_llm_client_falls_back_to_groq_api_2_when_primary_groq_fails():
+    payload = json.dumps({"ok": True})
+    call_count = 0
+
+    async def side_effect(url, *args, **kwargs):
+        nonlocal call_count
+        if "generativelanguage.googleapis.com" in url:
+            raise RuntimeError("gemini down")
+        if "api.groq.com" in url:
+            call_count += 1
+            auth = kwargs.get("headers", {}).get("Authorization", "")
+            if "groq-key" in auth:
+                raise RuntimeError("groq primary down")
+            if "groq-key-2" in auth:
+                return _chat_response(payload)
+            raise RuntimeError("unexpected groq key")
+        return _chat_response(payload)
+
+    with (
+        patch(
+            "httpx.AsyncClient.post", new_callable=AsyncMock, side_effect=side_effect
+        ),
+        patch("src.core.config.settings.settings.GEMINI_API_KEY", "gemini-key"),
+        patch("src.core.config.settings.settings.GROQ_API_KEY", "groq-key"),
+        patch("src.core.config.settings.settings.GROQ_API_KEY_2", "groq-key-2"),
+        patch("src.core.config.settings.settings.OPENROUTER_API_KEY", "or-key"),
+    ):
+        result = await generate_text_completion(
+            prompt="test",
+            agent_label="unit test",
+        )
+
+    assert result is not None
+    assert result.provider == "Groq API 2"
+    assert call_count == 2
+
+
+@pytest.mark.asyncio
 async def test_llm_client_falls_back_to_openrouter_when_gemini_and_groq_fail():
     payload = json.dumps({"ok": True})
 
@@ -95,6 +133,7 @@ async def test_llm_client_falls_back_to_openrouter_when_gemini_and_groq_fail():
         ),
         patch("src.core.config.settings.settings.GEMINI_API_KEY", "gemini-key"),
         patch("src.core.config.settings.settings.GROQ_API_KEY", "groq-key"),
+        patch("src.core.config.settings.settings.GROQ_API_KEY_2", ""),
         patch("src.core.config.settings.settings.OPENROUTER_API_KEY", "or-key"),
     ):
         result = await generate_text_completion(

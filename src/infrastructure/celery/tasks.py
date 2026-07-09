@@ -538,6 +538,7 @@ def _build_associate_communication_service(db) -> AssociateCommunicationService:
     audit_service = AuditService(activity_repo)
     ar_client = ARServiceClient()
     sla_service = SLAService(SLARepository(db), dispute_repo, audit_service, settings)
+    case_repo = CaseRepository(db)
     return AssociateCommunicationService(
         comm_repo=comm_repo,
         draft_repo=CommunicationDraftRepository(db),
@@ -552,10 +553,13 @@ def _build_associate_communication_service(db) -> AssociateCommunicationService:
         outbound_email_service=OutboundEmailService(
             ar_client=ar_client,
             comm_repo=comm_repo,
-            case_repo=CaseRepository(db),
+            case_repo=case_repo,
             audit_service=audit_service,
         ),
         sla_service=sla_service,
+        attachment_service=CaseAttachmentService(
+            case_repo, CaseAttachmentRepository(db)
+        ),
     )
 
 

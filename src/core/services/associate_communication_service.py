@@ -7,6 +7,7 @@ from uuid import UUID
 
 from src.core.exceptions.business_exceptions import ValidationException
 from src.core.services.audit_service import AuditService
+from src.core.services.case_attachment_service import CaseAttachmentService
 from src.core.services.conversation_history_service import ConversationHistoryService
 from src.core.services.outbound_email_service import OutboundEmailService
 from src.core.services.sla_service import PAUSE_SLA_TILL_REPLY_STATUSES, SLAService
@@ -22,6 +23,7 @@ from src.data.repositories.other_repositories import (
     CommentRepository,
 )
 from src.data.repositories.workflow_context_repository import WorkflowContextRepository
+from src.schemas.case import CaseAttachmentDTO
 
 
 def _is_system_outbound_communication(comm: Any) -> bool:
@@ -108,6 +110,7 @@ class AssociateCommunicationService:
         ar_client: ARServiceClient,
         outbound_email_service: OutboundEmailService,
         sla_service: SLAService,
+        attachment_service: CaseAttachmentService,
     ):
         self.comm_repo = comm_repo
         self.draft_repo = draft_repo
@@ -119,6 +122,7 @@ class AssociateCommunicationService:
         self.ar_client = ar_client
         self.outbound_email_service = outbound_email_service
         self.sla_service = sla_service
+        self.attachment_service = attachment_service
 
     async def _resolve_customer_email(self, dispute: Any) -> str:
         case = getattr(dispute, "case", None)
@@ -294,6 +298,19 @@ class AssociateCommunicationService:
             body.strip(),
             [att["filename"] for att in validated_attachments],
         )
+
+        if validated_attachments:
+            await self.attachment_service.persist_send_attachments(
+                dispute.case_id,
+                [
+                    CaseAttachmentDTO(
+                        filename=att["filename"],
+                        mime_type=att["mime_type"],
+                        content_base64=att["content_base64"],
+                    )
+                    for att in validated_attachments
+                ],
+            )
 
         comm = await self.comm_repo.create_communication(
             dispute_id=dispute.id,

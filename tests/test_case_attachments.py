@@ -21,7 +21,7 @@ from src.data.repositories import (
     DisputeRepository,
 )
 from src.schemas.auth import RoleName, TokenPayload
-from src.schemas.case import CaseIntakeRequest
+from src.schemas.case import CaseAttachmentDTO, CaseIntakeRequest
 
 MOCK_MANAGER = TokenPayload(
     sub=UUID("00000000-0000-0000-0000-000000000101"),
@@ -38,6 +38,16 @@ RAW_CONTENT_WITH_ATTACHMENT = (
     "ATTACHMENT CONTENT:\n"
     "ATTACHMENT 1 (Purchase_Order.pdf): extracted text"
 )
+
+
+@pytest.fixture
+def send_attachment_storage_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    storage_dir = tmp_path / "send-attachments"
+    storage_dir.mkdir()
+    monkeypatch.setattr(settings, "SEND_ATTACHMENT_STORAGE_DIR", str(storage_dir))
+    return storage_dir
 
 
 @pytest.fixture
@@ -222,3 +232,53 @@ async def test_merge_attachments_to_correlated_dispute_case(
     disk_path = attachment_storage_dir / primary_attachments[0].file_path
     assert disk_path.is_file()
     assert disk_path.read_bytes() == SAMPLE_PDF_BYTES
+
+
+@pytest.mark.asyncio
+async def test_persist_send_attachments_stores_in_send_storage(
+    db_session: AsyncSession,
+    attachment_storage_dir: Path,
+    send_attachment_storage_dir: Path,
+):
+    """Outbound compose-reply PDFs are stored under send-attachments and are downloadable."""
+    case_repo = CaseRepository(db_session)
+    attachment_repo = CaseAttachmentRepository(db_session)
+    attachment_service = CaseAttachmentService(case_repo, attachment_repo)
+
+    case = await case_repo.create_case(
+        case_number="CASE-SEND-001",
+        customer_email="customer@example.com",
+        email_subject="Dispute",
+        email_body="Please review the attached document.",
+        original_message_id=f"msg-{uuid4().hex}",
+        raw_content="Please review the attached document.",
+    )
+    await db_session.commit()
+
+    saved = await attachment_service.persist_send_attachments(
+        case.id,
+        [
+            CaseAttachmentDTO(
+                filename="Outbound_Report.pdf",
+                mime_type="application/pdf",
+                content_base64=SAMPLE_PDF_B64,
+            )
+        ],
+    )
+    await db_session.commit()
+
+    assert len(saved) == 1
+    assert saved[0].filename == "Outbound_Report.pdf"
+    assert saved[0].file_path.startswith("send-attachments/")
+
+    disk_path = send_attachment_storage_dir / saved[0].file_path.removeprefix(
+        "send-attachments/"
+    )
+    assert disk_path.is_file()
+    assert disk_path.read_bytes() == SAMPLE_PDF_BYTES
+
+    file_bytes, attachment = await attachment_service.get_attachment_file(
+        case.id, saved[0].id
+    )
+    assert attachment.filename == "Outbound_Report.pdf"
+    assert file_bytes == SAMPLE_PDF_BYTES

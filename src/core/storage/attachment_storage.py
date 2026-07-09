@@ -83,3 +83,13 @@ def get_attachment_storage() -> AttachmentStorage:
             raise ValueError("GCS_BUCKET is required when STORAGE_BACKEND=gcs")
         return GcsAttachmentStorage(settings.GCS_BUCKET, settings.GCS_PREFIX)
     return LocalAttachmentStorage(settings.CASE_ATTACHMENT_STORAGE_DIR)
+
+
+def get_send_attachment_storage() -> AttachmentStorage:
+    if settings.STORAGE_BACKEND == "gcs":
+        if not settings.GCS_BUCKET:
+            raise ValueError("GCS_BUCKET is required when STORAGE_BACKEND=gcs")
+        return GcsAttachmentStorage(
+            settings.GCS_BUCKET, settings.GCS_SEND_ATTACHMENTS_PREFIX
+        )
+    return LocalAttachmentStorage(settings.SEND_ATTACHMENT_STORAGE_DIR)
