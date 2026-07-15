@@ -1,6 +1,6 @@
 """Workflow interrupt service for recording pauses and reason context."""
 
-from typing import Any, Dict, Optional
+from typing import Any
 from uuid import UUID
 
 from src.core.services.audit_service import AuditService
@@ -22,7 +22,7 @@ class WorkflowInterruptService:
         self,
         dispute_id: UUID,
         reason: str,
-        details: Optional[Dict[str, Any]] = None,
+        details: dict[str, Any] | None = None,
     ) -> None:
         """Saves an interrupt trace inside the dispute workflow context."""
         context = await self.context_repo.get_by_dispute_id(dispute_id)

@@ -46,13 +46,19 @@ class RecommendationService:
 
         return rec
 
-    async def retrieve_latest_recommendation(self, dispute_id: UUID) -> DisputeResolutionRecommendation:
+    async def retrieve_latest_recommendation(
+        self, dispute_id: UUID
+    ) -> DisputeResolutionRecommendation:
         """Retrieves the latest version of recommendations for a dispute."""
         rec = await self.rec_repo.get_latest_recommendation(dispute_id)
         if not rec:
-            raise ValidationException(f"No recommendation found for dispute {dispute_id}.")
+            raise ValidationException(
+                f"No recommendation found for dispute {dispute_id}."
+            )
         return rec
 
-    async def list_recommendations_history(self, dispute_id: UUID) -> list[DisputeResolutionRecommendation]:
+    async def list_recommendations_history(
+        self, dispute_id: UUID
+    ) -> list[DisputeResolutionRecommendation]:
         """Lists historical recommendations for auditing / version comparison."""
         return await self.rec_repo.get_recommendations_for_dispute(dispute_id)

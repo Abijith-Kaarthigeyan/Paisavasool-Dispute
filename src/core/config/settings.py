@@ -1,4 +1,5 @@
 from functools import lru_cache
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -6,8 +7,12 @@ class Settings(BaseSettings):
     APP_NAME: str = "Paisa Vasool Dispute Service"
     ENVIRONMENT: str = "local"
 
-    DB_ASYNC_URL: str = "postgresql+asyncpg://paisavasool:paisavasool@postgres:5432/paisavasool"
-    DB_SYNC_URL: str = "postgresql+psycopg2://paisavasool:paisavasool@postgres:5432/paisavasool"
+    DB_ASYNC_URL: str = (
+        "postgresql+asyncpg://paisavasool:paisavasool@postgres:5432/paisavasool"
+    )
+    DB_SYNC_URL: str = (
+        "postgresql+psycopg2://paisavasool:paisavasool@postgres:5432/paisavasool"
+    )
     REDIS_URL: str = "redis://redis:6379/0"
 
     SECRET_KEY: str = "ilovepaisavasool"
@@ -18,7 +23,17 @@ class Settings(BaseSettings):
 
     GEMINI_API_KEY: str = ""
     GEMINI_MODEL_NAME: str = "gemini-2.5-flash"
+    GROQ_API_KEY: str = ""
+    GROQ_API_KEY_2: str = ""
+    GROQ_MODEL_NAME: str = "llama-3.3-70b-versatile"
     OPENROUTER_API_KEY: str = ""
+
+    CASE_ATTACHMENT_STORAGE_DIR: str = "/data/case-attachments"
+    SEND_ATTACHMENT_STORAGE_DIR: str = "/data/case-attachments/send-attachments"
+    STORAGE_BACKEND: str = "local"
+    GCS_BUCKET: str = ""
+    GCS_PREFIX: str = "paisavasool/case-attachments"
+    GCS_SEND_ATTACHMENTS_PREFIX: str = "paisavasool/send-attachments"
 
     # SLA Durations (in Hours)
     DISPUTE_SLA_PAYMENT_HOURS: int = 12

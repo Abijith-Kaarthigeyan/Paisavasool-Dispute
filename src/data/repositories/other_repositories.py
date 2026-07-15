@@ -1,7 +1,7 @@
-from datetime import datetime, date
-from uuid import UUID
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
+from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -84,7 +84,9 @@ class AttachmentRepository:
         )
         return result.scalar_one_or_none()
 
-    async def list_attachments_for_dispute(self, dispute_id: UUID) -> list[DisputeAttachment]:
+    async def list_attachments_for_dispute(
+        self, dispute_id: UUID
+    ) -> list[DisputeAttachment]:
         result = await self.db.execute(
             select(DisputeAttachment)
             .where(
@@ -129,7 +131,9 @@ class ActivityRepository:
         )
         return result.scalar_one_or_none()
 
-    async def list_activities_for_dispute(self, dispute_id: UUID) -> list[DisputeActivity]:
+    async def list_activities_for_dispute(
+        self, dispute_id: UUID
+    ) -> list[DisputeActivity]:
         result = await self.db.execute(
             select(DisputeActivity)
             .where(
@@ -215,6 +219,15 @@ class EvidenceSnapshotRepository:
             )
         )
         return result.scalar_one_or_none()
+
+    async def list_for_dispute(self, dispute_id: UUID) -> list[DisputeEvidenceSnapshot]:
+        result = await self.db.execute(
+            select(DisputeEvidenceSnapshot).where(
+                DisputeEvidenceSnapshot.dispute_id == dispute_id,
+                DisputeEvidenceSnapshot.is_deleted.is_(False),
+            )
+        )
+        return list(result.scalars().all())
 
     async def create_evidence_snapshot(
         self,

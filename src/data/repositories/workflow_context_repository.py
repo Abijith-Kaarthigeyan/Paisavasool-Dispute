@@ -20,7 +20,9 @@ class WorkflowContextRepository:
         )
         return result.scalar_one_or_none()
 
-    async def get_by_dispute_id(self, dispute_id: UUID) -> DisputeWorkflowContext | None:
+    async def get_by_dispute_id(
+        self, dispute_id: UUID
+    ) -> DisputeWorkflowContext | None:
         result = await self.db.execute(
             select(DisputeWorkflowContext).where(
                 DisputeWorkflowContext.dispute_id == dispute_id,
@@ -52,7 +54,9 @@ class WorkflowContextRepository:
             await self.db.flush()
         return context
 
-    async def update_workflow_context(self, context: DisputeWorkflowContext) -> DisputeWorkflowContext:
+    async def update_workflow_context(
+        self, context: DisputeWorkflowContext
+    ) -> DisputeWorkflowContext:
         context.updated_at = datetime.now()
         if not self.db.sync_session._flushing:
             await self.db.flush()

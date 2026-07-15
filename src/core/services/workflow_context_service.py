@@ -1,6 +1,6 @@
 from uuid import UUID
 
-from src.core.exceptions.business_exceptions import ValidationException, WorkflowException
+from src.core.exceptions.business_exceptions import WorkflowContextNotFoundException
 from src.core.services.audit_service import AuditService
 from src.data.models.postgres.workflow_context import DisputeWorkflowContext
 from src.data.repositories.workflow_context_repository import WorkflowContextRepository
@@ -57,12 +57,18 @@ class WorkflowContextService:
 
         return context
 
-    async def load_checkpoint(self, dispute_id: UUID) -> DisputeWorkflowContext:
-        """Loads the current checkpoint context for a dispute."""
+    async def get_context(self, dispute_id: UUID) -> DisputeWorkflowContext:
+        """Returns workflow context for a dispute or raises if missing."""
         context = await self.context_repo.get_by_dispute_id(dispute_id)
         if not context:
-            raise WorkflowException(f"No workflow context found for dispute {dispute_id}.")
+            raise WorkflowContextNotFoundException(
+                f"No workflow context found for dispute {dispute_id}."
+            )
         return context
+
+    async def load_checkpoint(self, dispute_id: UUID) -> DisputeWorkflowContext:
+        """Loads the current checkpoint context for a dispute."""
+        return await self.get_context(dispute_id)
 
     async def update_node(
         self, dispute_id: UUID, current_node: str, workflow_state: dict
@@ -83,4 +89,6 @@ class WorkflowContextService:
             "workflow_state": context.workflow_state,
             "last_checkpoint": context.last_checkpoint,
         }
+
+
 DefinitionName = "WorkflowContextService"

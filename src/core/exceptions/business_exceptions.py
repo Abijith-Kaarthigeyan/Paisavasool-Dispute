@@ -3,6 +3,7 @@ from src.core.exceptions.base import AppException
 
 class BusinessException(AppException):
     """Base exception for all business rules violations."""
+
     def __init__(self, message: str, status_code: int = 400):
         super().__init__(message, status_code=status_code)
 
@@ -14,6 +15,16 @@ class ValidationException(BusinessException):
 
 class CaseNotFoundException(BusinessException):
     def __init__(self, message: str = "Case not found"):
+        super().__init__(message, status_code=404)
+
+
+class CaseAttachmentNotFoundException(BusinessException):
+    def __init__(self, message: str = "Case attachment not found"):
+        super().__init__(message, status_code=404)
+
+
+class ReviewQueueItemNotFoundException(BusinessException):
+    def __init__(self, message: str = "Review queue item not found"):
         super().__init__(message, status_code=404)
 
 
@@ -42,8 +53,20 @@ class WorkflowException(BusinessException):
         super().__init__(message, status_code=400)
 
 
+class WorkflowContextNotFoundException(BusinessException):
+    def __init__(self, message: str = "Workflow context not found"):
+        super().__init__(message, status_code=404)
+
+
+class SLADetailsNotFoundException(BusinessException):
+    def __init__(self, message: str = "SLA details not found"):
+        super().__init__(message, status_code=404)
+
+
 class ARServiceClientException(AppException):
-    def __init__(self, message: str = "AR Service client error", status_code: int = 502):
+    def __init__(
+        self, message: str = "AR Service client error", status_code: int = 502
+    ):
         super().__init__(message, status_code=status_code)
 
 

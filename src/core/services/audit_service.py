@@ -1,4 +1,3 @@
-import logging
 from uuid import UUID
 
 from src.data.repositories.other_repositories import ActivityRepository

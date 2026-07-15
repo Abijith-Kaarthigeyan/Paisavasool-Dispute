@@ -1,18 +1,21 @@
 """LangGraph checkpoint saver using Postgres dispute_workflow_context."""
 
-from typing import Any, AsyncIterator, Iterator, Optional, Sequence
+import json
+from collections.abc import AsyncIterator, Iterator, Sequence
+from typing import Any
 from uuid import UUID
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import (
     BaseCheckpointSaver,
+    ChannelVersions,
     Checkpoint,
     CheckpointMetadata,
     CheckpointTuple,
-    ChannelVersions,
 )
-
 from sqlalchemy.orm.attributes import flag_modified
+
+from src.data.repositories.dispute_repository import DisputeRepository
 from src.data.repositories.workflow_context_repository import WorkflowContextRepository
 
 
@@ -28,10 +31,8 @@ class DbWorkflowCheckpointer(BaseCheckpointSaver):
         except ValueError:
             return False
 
-        from sqlalchemy import select
-        from src.data.models.postgres.dispute import Dispute
-        result = await db.execute(select(Dispute.id).where(Dispute.id == dispute_id))
-        return result.scalar() is not None
+        dispute_repo = DisputeRepository(db)
+        return await dispute_repo.exists(dispute_id)
 
     def _dumps(self, obj: Any) -> str:
         if obj is None:
@@ -53,23 +54,22 @@ class DbWorkflowCheckpointer(BaseCheckpointSaver):
             except Exception:
                 pass
         # Fallback for json loads
-        import json
         try:
             return json.loads(s)
         except Exception:
             return s
 
-    def get_tuple(self, config: RunnableConfig) -> Optional[CheckpointTuple]:
+    def get_tuple(self, config: RunnableConfig) -> CheckpointTuple | None:
         """Synchronous checkpoint retrieval (not supported in this async-first app)."""
         raise NotImplementedError("Use async aget_tuple method instead.")
 
     def list(
         self,
-        config: Optional[RunnableConfig],
+        config: RunnableConfig | None,
         *,
-        filter: Optional[dict[str, Any]] = None,
-        before: Optional[RunnableConfig] = None,
-        limit: Optional[int] = None,
+        filter: dict[str, Any] | None = None,
+        before: RunnableConfig | None = None,
+        limit: int | None = None,
     ) -> Iterator[CheckpointTuple]:
         """Synchronous checkpoint listing (not supported)."""
         raise NotImplementedError("Use async alist method instead.")
@@ -94,7 +94,7 @@ class DbWorkflowCheckpointer(BaseCheckpointSaver):
         """Synchronous intermediate writes storage (not supported)."""
         raise NotImplementedError("Use async aput_writes method instead.")
 
-    async def aget_tuple(self, config: RunnableConfig) -> Optional[CheckpointTuple]:
+    async def aget_tuple(self, config: RunnableConfig) -> CheckpointTuple | None:
         """Asynchronously retrieve a checkpoint tuple using configuration."""
         db = config.get("configurable", {}).get("db")
         thread_id = config.get("configurable", {}).get("thread_id")
@@ -260,11 +260,11 @@ class DbWorkflowCheckpointer(BaseCheckpointSaver):
 
     async def alist(
         self,
-        config: Optional[RunnableConfig],
+        config: RunnableConfig | None,
         *,
-        filter: Optional[dict[str, Any]] = None,
-        before: Optional[RunnableConfig] = None,
-        limit: Optional[int] = None,
+        filter: dict[str, Any] | None = None,
+        before: RunnableConfig | None = None,
+        limit: int | None = None,
     ) -> AsyncIterator[CheckpointTuple]:
         """Asynchronously list checkpoints matching criteria."""
         if not config:

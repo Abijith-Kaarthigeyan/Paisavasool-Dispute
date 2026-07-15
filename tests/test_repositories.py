@@ -1,13 +1,14 @@
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime
 from uuid import uuid4
+
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.data.repositories.assignment_repository import AssignmentRepository
 from src.data.repositories.case_repository import CaseRepository
 from src.data.repositories.dispute_repository import DisputeRepository
-from src.data.repositories.assignment_repository import AssignmentRepository
-from src.data.repositories.sla_repository import SLARepository
 from src.data.repositories.review_queue_repository import ReviewQueueRepository
+from src.data.repositories.sla_repository import SLARepository
 
 
 @pytest.mark.asyncio
@@ -163,7 +164,7 @@ async def test_sla_repository(db_session: AsyncSession):
     )
 
     # Create SLA
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     sla = await sla_repo.create_sla(
         dispute_id=dispute.id,
         sla_minutes=1440,

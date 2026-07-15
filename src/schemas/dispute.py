@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -88,3 +89,68 @@ class ReviewQueueResponse(BaseModel):
     retry_count: int
     created_at: datetime
     updated_at: datetime
+
+
+class DisputeCommunicationResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
+
+    id: UUID
+    dispute_id: UUID
+    recipient: str
+    subject: str
+    message_body: str = Field(validation_alias="body")
+    communication_type: str
+    gmail_message_id: str | None = None
+    rfc_message_id: str | None = None
+    pause_sla_till_reply: bool = False
+    sent_time: datetime = Field(validation_alias="created_at")
+    created_at: datetime
+
+
+class AssociateCommunicationDraftRequest(BaseModel):
+    instructions: str | None = None
+
+
+class AssociateCommunicationDraftResponse(BaseModel):
+    id: UUID | None = None
+    recipient: str
+    subject: str
+    body: str
+    status: str | None = None
+    created_at: datetime | None = None
+
+
+class OutboundEmailAttachment(BaseModel):
+    filename: str = Field(min_length=1)
+    content_base64: str = Field(min_length=1)
+    mime_type: str = Field(default="application/pdf")
+
+
+class AssociateCommunicationSendRequest(BaseModel):
+    recipient: str
+    subject: str
+    body: str
+    attachments: list[OutboundEmailAttachment] = Field(default_factory=list)
+    pause_sla_till_reply: bool = False
+
+
+class DisputeDecisionRequest(BaseModel):
+    decision: str
+    comments: str | None = None
+    amended_invoice_json: dict | None = None
+
+
+class ReviewQueueResolveRequest(BaseModel):
+    invoice_number: str
+    dispute_category: str
+    comments: str | None = None
+
+
+class DisputeEscalateRequest(BaseModel):
+    comments: str | None = None
+
+
+class DisputeCloseRequest(BaseModel):
+    resolution_method: Literal["PHONE", "IN_PERSON", "EMAIL", "OTHER"]
+    resolution_outcome: Literal["CUSTOMER_CORRECT", "COMPANY_CORRECT"]
+    comments: str = Field(..., min_length=1)

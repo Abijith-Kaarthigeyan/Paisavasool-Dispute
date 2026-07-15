@@ -1,9 +1,10 @@
 import random
 from uuid import UUID
 
-from sqlalchemy import func, select
-
-from src.core.exceptions.business_exceptions import AssignmentException, ValidationException
+from src.core.exceptions.business_exceptions import (
+    AssignmentException,
+    ValidationException,
+)
 from src.core.services.audit_service import AuditService
 from src.data.models.postgres.dispute import Dispute
 from src.data.repositories.assignment_repository import AssignmentRepository
@@ -26,17 +27,11 @@ class AssignmentService:
 
     async def calculate_workload(self, associate_id: UUID) -> int:
         """Count active disputes (status not in RESOLVED, CLOSED, FAILED) assigned to an associate."""
-        # Find active disputes for associate
-        result = await self.user_repo.db.execute(
-            select(func.count(Dispute.id)).where(
-                Dispute.assigned_to == associate_id,
-                Dispute.status.not_in(["RESOLVED", "CLOSED", "FAILED"]),
-                Dispute.is_deleted.is_(False),
-            )
-        )
-        return result.scalar() or 0
+        return await self.dispute_repo.count_active_disputes_for_associate(associate_id)
 
-    async def assign_dispute(self, dispute_id: UUID, performed_by: UUID | None = None) -> Dispute:
+    async def assign_dispute(
+        self, dispute_id: UUID, performed_by: UUID | None = None
+    ) -> Dispute:
         """Automatically assigns a dispute to the active associate with the lowest workload."""
         dispute = await self.dispute_repo.get_by_id(dispute_id)
         if not dispute:
@@ -45,7 +40,9 @@ class AssignmentService:
         # 1. Fetch all active associates
         associates = await self.user_repo.get_active_finance_associates()
         if not associates:
-            raise AssignmentException("No active finance associates available for assignment.")
+            raise AssignmentException(
+                "No active finance associates available for assignment."
+            )
 
         # 2. Calculate workload for each
         counts = []
@@ -83,7 +80,9 @@ class AssignmentService:
             performed_by=performed_by,
             metadata={
                 "assigned_to": str(selected_associate.id),
-                "manager_id": str(selected_associate.manager_id) if selected_associate.manager_id else None,
+                "manager_id": str(selected_associate.manager_id)
+                if selected_associate.manager_id
+                else None,
                 "auto": True,
             },
         )
@@ -123,7 +122,9 @@ class AssignmentService:
             performed_by=performed_by,
             metadata={
                 "assigned_to": str(new_associate_id),
-                "manager_id": str(new_associate.manager_id) if new_associate.manager_id else None,
+                "manager_id": str(new_associate.manager_id)
+                if new_associate.manager_id
+                else None,
                 "auto": False,
             },
         )

@@ -11,17 +11,25 @@ class DisputeCase(Base):
     __tablename__ = "dispute_cases"
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
-    case_number: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+    case_number: Mapped[str] = mapped_column(
+        String(100), unique=True, nullable=False, index=True
+    )
     customer_email: Mapped[str] = mapped_column(String(255), nullable=False)
     email_subject: Mapped[str | None] = mapped_column(String(255), nullable=True)
     email_body: Mapped[str | None] = mapped_column(Text, nullable=True)
     original_message_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    gmail_thread_id: Mapped[str | None] = mapped_column(
+        String(255), nullable=True, index=True
+    )
+    rfc_message_id: Mapped[str | None] = mapped_column(String(512), nullable=True)
     raw_content: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(50), default="OPEN", nullable=False)
 
     # Soft Delete / Data Retention
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     deleted_by: Mapped[UUID | None] = mapped_column(nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
@@ -34,4 +42,9 @@ class DisputeCase(Base):
         nullable=False,
     )
 
-    disputes = relationship("Dispute", back_populates="case", cascade="all, delete-orphan")
+    disputes = relationship(
+        "Dispute", back_populates="case", cascade="all, delete-orphan"
+    )
+    attachments = relationship(
+        "CaseAttachment", back_populates="case", cascade="all, delete-orphan"
+    )

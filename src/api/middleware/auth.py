@@ -1,6 +1,7 @@
 import httpx
 from fastapi import Request
 from fastapi.responses import JSONResponse
+from jose import jwt as jose_jwt
 
 from src.core.config.settings import settings
 from src.observability.logging.logger import logger
@@ -31,8 +32,9 @@ async def auth_middleware(request: Request, call_next):
     # 1. Try local verification of system JWT signed with shared SECRET_KEY
     is_system_verified = False
     try:
-        from jose import jwt as jose_jwt
-        payload = jose_jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+        payload = jose_jwt.decode(
+            token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM]
+        )
         if payload.get("service") is True and payload.get("sub") == "ar-service":
             request.state.user = {
                 "sub": "00000000-0000-0000-0000-000000000101",

@@ -1,8 +1,13 @@
 """Workflow resume service for resuming paused/interrupted dispute processes."""
 
-from typing import Any, Dict, Optional
+from typing import Any
 from uuid import UUID
+
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from src.core.exceptions.business_exceptions import ValidationException
+from src.core.workflow.graph import get_graph
+from src.data.repositories.dispute_repository import DisputeRepository
 
 
 class DisputeResumeService:
@@ -15,9 +20,9 @@ class DisputeResumeService:
         self,
         db: AsyncSession,
         dispute_id: UUID,
-        state_updates: Optional[Dict[str, Any]] = None,
-        as_node: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        state_updates: dict[str, Any] | None = None,
+        as_node: str | None = None,
+    ) -> dict[str, Any]:
         """Loads context, applies state updates, and triggers LangGraph resumption.
 
         Args:
@@ -28,9 +33,16 @@ class DisputeResumeService:
 
         Returns:
             The final state dict of the execution.
+
+        Raises:
+            ValidationException: If the dispute is already closed.
         """
-        # Import dynamically to avoid circular import issues
-        from src.core.workflow.graph import get_graph
+        dispute_repo = DisputeRepository(db)
+        dispute = await dispute_repo.get_by_id(dispute_id)
+        if dispute and dispute.status == "CLOSED":
+            raise ValidationException(
+                f"Cannot resume workflow for dispute {dispute_id} in status CLOSED."
+            )
 
         config = {
             "configurable": {

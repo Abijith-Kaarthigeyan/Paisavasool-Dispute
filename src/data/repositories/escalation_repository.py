@@ -20,7 +20,9 @@ class EscalationRepository:
         )
         return result.scalar_one_or_none()
 
-    async def get_escalations_for_dispute(self, dispute_id: UUID) -> list[DisputeEscalation]:
+    async def get_escalations_for_dispute(
+        self, dispute_id: UUID
+    ) -> list[DisputeEscalation]:
         result = await self.db.execute(
             select(DisputeEscalation).where(
                 DisputeEscalation.dispute_id == dispute_id,
@@ -46,5 +48,13 @@ class EscalationRepository:
             resolved=False,
         )
         self.db.add(escalation)
-        await self.db.flush()
+        if not self.db.sync_session._flushing:
+            await self.db.flush()
+        return escalation
+
+    async def update_escalation(
+        self, escalation: DisputeEscalation
+    ) -> DisputeEscalation:
+        if not self.db.sync_session._flushing:
+            await self.db.flush()
         return escalation

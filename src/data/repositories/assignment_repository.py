@@ -20,7 +20,9 @@ class AssignmentRepository:
         )
         return result.scalar_one_or_none()
 
-    async def get_active_assignment_for_dispute(self, dispute_id: UUID) -> DisputeAssignment | None:
+    async def get_active_assignment_for_dispute(
+        self, dispute_id: UUID
+    ) -> DisputeAssignment | None:
         result = await self.db.execute(
             select(DisputeAssignment).where(
                 DisputeAssignment.dispute_id == dispute_id,
