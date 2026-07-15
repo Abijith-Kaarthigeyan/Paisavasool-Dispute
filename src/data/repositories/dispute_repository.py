@@ -1,13 +1,14 @@
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
 from src.core.workflow.triage_agent import DisputeTriageAgent
 from src.data.models.postgres.case import DisputeCase
 from src.data.models.postgres.dispute import Dispute
+from src.data.models.postgres.sla import DisputeSLA
 
 
 def _normalize_invoice_number(invoice_number: str) -> str:
@@ -77,23 +78,86 @@ class DisputeRepository:
         )
         return list(result.scalars().all())
 
+    def _apply_list_filters(
+        self,
+        query,
+        *,
+        customer_id: UUID | None = None,
+        status: str | None = None,
+        category: str | None = None,
+        invoice_number: str | None = None,
+        assigned_to: UUID | None = None,
+        search: str | None = None,
+        sla_status: str | None = None,
+        has_assignee: bool | None = None,
+        exclude_statuses: list[str] | None = None,
+    ):
+        if customer_id:
+            query = query.where(Dispute.customer_id == customer_id)
+        if status:
+            query = query.where(Dispute.status == status)
+        if exclude_statuses:
+            query = query.where(Dispute.status.not_in(exclude_statuses))
+        if category:
+            query = query.where(Dispute.dispute_category == category)
+        if invoice_number:
+            query = query.where(Dispute.invoice_number == invoice_number)
+        if assigned_to:
+            query = query.where(Dispute.assigned_to == assigned_to)
+        if has_assignee is True:
+            query = query.where(Dispute.assigned_to.is_not(None))
+        elif has_assignee is False:
+            query = query.where(Dispute.assigned_to.is_(None))
+        if search and search.strip():
+            term = f"%{search.strip()}%"
+            query = query.where(
+                or_(
+                    Dispute.dispute_number.ilike(term),
+                    Dispute.invoice_number.ilike(term),
+                )
+            )
+        if sla_status:
+            query = query.join(Dispute.sla).where(
+                DisputeSLA.status == sla_status,
+                DisputeSLA.is_deleted.is_(False),
+            )
+        return query
+
     async def list_disputes(
         self,
         *,
         customer_id: UUID | None = None,
         status: str | None = None,
+        category: str | None = None,
+        invoice_number: str | None = None,
+        assigned_to: UUID | None = None,
+        search: str | None = None,
+        sla_status: str | None = None,
+        has_assignee: bool | None = None,
+        exclude_statuses: list[str] | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[Dispute]:
-        query = select(Dispute).where(Dispute.is_deleted.is_(False))
-        if customer_id:
-            query = query.where(Dispute.customer_id == customer_id)
-        if status:
-            query = query.where(Dispute.status == status)
-
+        query = (
+            select(Dispute)
+            .options(joinedload(Dispute.sla))
+            .where(Dispute.is_deleted.is_(False))
+        )
+        query = self._apply_list_filters(
+            query,
+            customer_id=customer_id,
+            status=status,
+            category=category,
+            invoice_number=invoice_number,
+            assigned_to=assigned_to,
+            search=search,
+            sla_status=sla_status,
+            has_assignee=has_assignee,
+            exclude_statuses=exclude_statuses,
+        )
         query = query.order_by(Dispute.created_at.desc()).limit(limit).offset(offset)
         result = await self.db.execute(query)
-        return list(result.scalars().all())
+        return list(result.scalars().unique().all())
 
     async def list_by_assigned_associate(
         self,
@@ -101,22 +165,46 @@ class DisputeRepository:
         *,
         customer_id: UUID | None = None,
         status: str | None = None,
+        category: str | None = None,
+        invoice_number: str | None = None,
+        search: str | None = None,
+        sla_status: str | None = None,
+        exclude_statuses: list[str] | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[Dispute]:
         """List disputes assigned to a specific finance associate."""
-        query = select(Dispute).where(
-            Dispute.assigned_to == associate_id,
-            Dispute.is_deleted.is_(False),
+        query = (
+            select(Dispute)
+            .options(joinedload(Dispute.sla))
+            .where(
+                Dispute.assigned_to == associate_id,
+                Dispute.is_deleted.is_(False),
+            )
         )
-        if customer_id:
-            query = query.where(Dispute.customer_id == customer_id)
-        if status:
-            query = query.where(Dispute.status == status)
-
+        query = self._apply_list_filters(
+            query,
+            customer_id=customer_id,
+            status=status,
+            category=category,
+            invoice_number=invoice_number,
+            search=search,
+            sla_status=sla_status,
+            exclude_statuses=exclude_statuses,
+        )
         query = query.order_by(Dispute.created_at.desc()).limit(limit).offset(offset)
         result = await self.db.execute(query)
-        return list(result.scalars().all())
+        return list(result.scalars().unique().all())
+
+    async def list_distinct_invoice_numbers(self, limit: int = 500) -> list[str]:
+        result = await self.db.execute(
+            select(Dispute.invoice_number)
+            .where(Dispute.is_deleted.is_(False))
+            .distinct()
+            .order_by(Dispute.invoice_number)
+            .limit(limit)
+        )
+        return [row[0] for row in result.all() if row[0]]
 
     async def create_dispute(
         self,

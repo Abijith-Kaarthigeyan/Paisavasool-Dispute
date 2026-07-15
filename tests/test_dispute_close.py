@@ -36,6 +36,13 @@ MOCK_ASSOCIATE = TokenPayload(
     is_active=True,
 )
 
+MOCK_MANAGER = TokenPayload(
+    sub=UUID("00000000-0000-0000-0000-000000000101"),
+    email="manager@paisavasool.com",
+    role=RoleName.FINANCE_MANAGER,
+    is_active=True,
+)
+
 
 def _build_close_service(db_session: AsyncSession) -> DisputeCloseService:
     dispute_repo = DisputeRepository(db_session)
@@ -72,6 +79,8 @@ async def _seed_dispute(
     status: str = "OPEN",
     with_sla: bool = True,
     with_context: bool = True,
+    assigned_to: UUID | None = None,
+    manager_id: UUID | None = None,
 ) -> tuple:
     case_repo = CaseRepository(db_session)
     dispute_repo = DisputeRepository(db_session)
@@ -91,6 +100,8 @@ async def _seed_dispute(
         customer_id=uuid4(),
         dispute_category="AMENDMENT",
         status=status,
+        assigned_to=assigned_to,
+        manager_id=manager_id,
     )
 
     if with_sla:
@@ -357,3 +368,74 @@ async def test_associate_decision_api_blocked_after_close(
         headers={"Authorization": "Bearer dummy"},
     )
     assert decision_resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_associate_close_blocked_when_escalated(
+    mock_client: AsyncClient, db_session, seed_users
+):
+    dispute, _ = await _seed_dispute(
+        db_session,
+        status="ESCALATED",
+        assigned_to=seed_users["associate"].id,
+        manager_id=seed_users["manager"].id,
+    )
+    app.dependency_overrides[get_current_user] = lambda: MOCK_ASSOCIATE
+
+    resp = await mock_client.post(
+        f"/api/v1/disputes/{dispute.id}/close",
+        json={
+            "resolution_method": "PHONE",
+            "resolution_outcome": "CUSTOMER_CORRECT",
+            "comments": "Associate should not close after escalation.",
+        },
+        headers={"Authorization": "Bearer dummy"},
+    )
+    assert resp.status_code == 403
+    assert "escalated" in resp.json()["error"]["message"].lower()
+
+
+@pytest.mark.asyncio
+async def test_associate_decision_blocked_when_escalated(
+    mock_client: AsyncClient, db_session, seed_users
+):
+    dispute, _ = await _seed_dispute(
+        db_session,
+        status="ESCALATED",
+        assigned_to=seed_users["associate"].id,
+        manager_id=seed_users["manager"].id,
+    )
+    app.dependency_overrides[get_current_user] = lambda: MOCK_ASSOCIATE
+
+    resp = await mock_client.post(
+        f"/api/v1/disputes/{dispute.id}/associate-decision",
+        json={"decision": "APPROVE", "comments": "Should be frozen."},
+        headers={"Authorization": "Bearer dummy"},
+    )
+    assert resp.status_code == 403
+    assert "escalated" in resp.json()["error"]["message"].lower()
+
+
+@pytest.mark.asyncio
+async def test_manager_close_allowed_when_escalated(
+    mock_client: AsyncClient, db_session, seed_users
+):
+    dispute, _ = await _seed_dispute(
+        db_session,
+        status="ESCALATED",
+        assigned_to=seed_users["associate"].id,
+        manager_id=seed_users["manager"].id,
+    )
+    app.dependency_overrides[get_current_user] = lambda: MOCK_MANAGER
+
+    resp = await mock_client.post(
+        f"/api/v1/disputes/{dispute.id}/close",
+        json={
+            "resolution_method": "PHONE",
+            "resolution_outcome": "CUSTOMER_CORRECT",
+            "comments": "Manager resolving escalated dispute.",
+        },
+        headers={"Authorization": "Bearer dummy"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "CLOSED"

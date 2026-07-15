@@ -48,12 +48,26 @@ class DisputeService:
         *,
         customer_id: UUID | None = None,
         status: str | None = None,
+        category: str | None = None,
+        invoice_number: str | None = None,
+        assigned_to: UUID | None = None,
+        search: str | None = None,
+        sla_status: str | None = None,
+        has_assignee: bool | None = None,
+        exclude_statuses: list[str] | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[Dispute]:
         return await self.dispute_repo.list_disputes(
             customer_id=customer_id,
             status=status,
+            category=category,
+            invoice_number=invoice_number,
+            assigned_to=assigned_to,
+            search=search,
+            sla_status=sla_status,
+            has_assignee=has_assignee,
+            exclude_statuses=exclude_statuses,
             limit=limit,
             offset=offset,
         )
@@ -65,6 +79,13 @@ class DisputeService:
         user_id: UUID,
         customer_id: UUID | None = None,
         status: str | None = None,
+        category: str | None = None,
+        invoice_number: str | None = None,
+        assigned_to: UUID | None = None,
+        search: str | None = None,
+        sla_status: str | None = None,
+        has_assignee: bool | None = None,
+        exclude_statuses: list[str] | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[Dispute]:
@@ -73,12 +94,24 @@ class DisputeService:
                 user_id,
                 customer_id=customer_id,
                 status=status,
+                category=category,
+                invoice_number=invoice_number,
+                search=search,
+                sla_status=sla_status,
+                exclude_statuses=exclude_statuses,
                 limit=limit,
                 offset=offset,
             )
         return await self.list_disputes(
             customer_id=customer_id,
             status=status,
+            category=category,
+            invoice_number=invoice_number,
+            assigned_to=assigned_to,
+            search=search,
+            sla_status=sla_status,
+            has_assignee=has_assignee,
+            exclude_statuses=exclude_statuses,
             limit=limit,
             offset=offset,
         )
@@ -91,6 +124,14 @@ class DisputeService:
     ) -> None:
         if role == RoleName.FINANCE_ASSOCIATE and dispute.assigned_to != user_id:
             raise ForbiddenException("Access to this dispute is denied.")
+
+    def assert_associate_can_mutate_status(
+        self, dispute: Dispute, role: RoleName
+    ) -> None:
+        if role == RoleName.FINANCE_ASSOCIATE and dispute.status == "ESCALATED":
+            raise ForbiddenException(
+                "Dispute is escalated to the manager; associates cannot change its status."
+            )
 
     async def get_dispute(self, dispute_id: UUID) -> Dispute:
         dispute = await self.dispute_repo.get_by_id(dispute_id)

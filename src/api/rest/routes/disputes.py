@@ -45,17 +45,40 @@ require_finance_or_manager = require_roles(
 async def list_disputes(
     customer_id: UUID | None = Query(None),
     status: str | None = Query(None),
+    category: str | None = Query(None, description="Filter by dispute category"),
+    invoice_number: str | None = Query(None),
+    assigned_to: UUID | None = Query(None),
+    search: str | None = Query(
+        None, description="Search dispute number or invoice number"
+    ),
+    sla_status: str | None = Query(None, description="Filter by SLA status"),
+    has_assignee: bool | None = Query(None, description="Require assigned disputes"),
+    exclude_statuses: str | None = Query(
+        None, description="Comma-separated statuses to exclude"
+    ),
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
     current_user: TokenPayload = Depends(require_finance),
     dispute_service: DisputeService = Depends(get_dispute_service),
 ):
     """Retrieves a paginated list of disputes with optional filters."""
+    excluded = (
+        [s.strip() for s in exclude_statuses.split(",") if s.strip()]
+        if exclude_statuses
+        else None
+    )
     disputes = await dispute_service.list_disputes_for_user(
         role=current_user.role,
         user_id=current_user.sub,
         customer_id=customer_id,
         status=status,
+        category=category,
+        invoice_number=invoice_number,
+        assigned_to=assigned_to,
+        search=search,
+        sla_status=sla_status,
+        has_assignee=has_assignee,
+        exclude_statuses=excluded,
         limit=limit,
         offset=offset,
     )
@@ -135,7 +158,10 @@ async def interrupt_dispute_workflow(
     workflow_service: DisputeWorkflowService = Depends(get_dispute_workflow_service),
 ):
     """Manually interrupts/pauses the dispute workflow execution."""
-    await dispute_service.get_dispute_for_user(id, current_user.role, current_user.sub)
+    dispute = await dispute_service.get_dispute_for_user(
+        id, current_user.role, current_user.sub
+    )
+    dispute_service.assert_associate_can_mutate_status(dispute, current_user.role)
     return await workflow_service.interrupt_workflow(id, performed_by=current_user.sub)
 
 
@@ -147,7 +173,10 @@ async def resume_dispute_workflow(
     workflow_service: DisputeWorkflowService = Depends(get_dispute_workflow_service),
 ):
     """Resumes execution of the dispute workflow from the last checkpoint."""
-    await dispute_service.get_dispute_for_user(id, current_user.role, current_user.sub)
+    dispute = await dispute_service.get_dispute_for_user(
+        id, current_user.role, current_user.sub
+    )
+    dispute_service.assert_associate_can_mutate_status(dispute, current_user.role)
     return await workflow_service.resume_workflow(id)
 
 
@@ -160,7 +189,10 @@ async def submit_associate_decision(
     decision_service: DisputeDecisionService = Depends(get_dispute_decision_service),
 ):
     """Submits Associate Approval (APPROVE/REJECT/EDIT_AND_APPLY) and resumes the workflow."""
-    await dispute_service.get_dispute_for_user(id, current_user.role, current_user.sub)
+    dispute = await dispute_service.get_dispute_for_user(
+        id, current_user.role, current_user.sub
+    )
+    dispute_service.assert_associate_can_mutate_status(dispute, current_user.role)
     return await decision_service.submit_associate_decision(
         id,
         decision=payload.decision,
@@ -179,7 +211,10 @@ async def submit_payment_review_decision(
     decision_service: DisputeDecisionService = Depends(get_dispute_decision_service),
 ):
     """Submits Payment Review decision and resumes the workflow."""
-    await dispute_service.get_dispute_for_user(id, current_user.role, current_user.sub)
+    dispute = await dispute_service.get_dispute_for_user(
+        id, current_user.role, current_user.sub
+    )
+    dispute_service.assert_associate_can_mutate_status(dispute, current_user.role)
     return await decision_service.submit_payment_review_decision(
         id,
         decision=payload.decision,
@@ -197,7 +232,10 @@ async def submit_operational_review_decision(
     decision_service: DisputeDecisionService = Depends(get_dispute_decision_service),
 ):
     """Submits Operational Review decision and resumes the workflow."""
-    await dispute_service.get_dispute_for_user(id, current_user.role, current_user.sub)
+    dispute = await dispute_service.get_dispute_for_user(
+        id, current_user.role, current_user.sub
+    )
+    dispute_service.assert_associate_can_mutate_status(dispute, current_user.role)
     return await decision_service.submit_operational_review_decision(
         id,
         decision=payload.decision,
@@ -373,7 +411,10 @@ async def close_dispute_manually(
     close_service: DisputeCloseService = Depends(get_dispute_close_service),
 ):
     """Manually closes a dispute without completing the automated workflow."""
-    await dispute_service.get_dispute_for_user(id, current_user.role, current_user.sub)
+    dispute = await dispute_service.get_dispute_for_user(
+        id, current_user.role, current_user.sub
+    )
+    dispute_service.assert_associate_can_mutate_status(dispute, current_user.role)
     dispute = await close_service.manual_close(
         id,
         resolution_method=payload.resolution_method,
