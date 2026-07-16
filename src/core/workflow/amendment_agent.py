@@ -14,7 +14,10 @@ class AmendmentResolutionAgent:
 
     @classmethod
     def _regex_fallback(
-        cls, raw_customer_text: str, invoice_json: dict
+        cls,
+        raw_customer_text: str,
+        invoice_json: dict,
+        purchase_order_json: dict | None = None,
     ) -> dict[str, Any]:
         """Deterministic fallback when LLM is offline or key missing."""
         logger.info("Executing regex/fallback amendment resolution parser")
@@ -27,6 +30,24 @@ class AmendmentResolutionAgent:
         confidence = 75.0
         reasoning = "Fallback regex active. No LLM response. Requesting clarification on claims."
         recommended_invoice = None
+
+        if purchase_order_json:
+            outcome = "COMPANY_CORRECT"
+            confidence = 80.0
+            po_number = (
+                purchase_order_json.get("po_number") or "the linked purchase order"
+            )
+            reasoning = (
+                f"Fallback review used the linked purchase order {po_number}. "
+                "The invoice on file should be reviewed against that system purchase order first, "
+                "so no additional purchase order should be requested from the customer."
+            )
+            return {
+                "resolution_outcome": outcome,
+                "confidence": confidence,
+                "reasoning": reasoning,
+                "recommended_invoice_json": recommended_invoice,
+            }
 
         # Check if they request simple price change or tax check
         if "pricing" in text_lower or "price" in text_lower:
@@ -48,6 +69,7 @@ class AmendmentResolutionAgent:
         cls,
         raw_customer_text: str,
         invoice_json: dict,
+        purchase_order_json: dict | None,
         dispute_category: str,
     ) -> dict[str, Any]:
         """Compares customer claims against invoice and decides CORRECT/INCORRECT/NEED_MORE_INFO.
@@ -67,22 +89,32 @@ Customer Conversation History (oldest to newest):
 Invoice on file (system record):
 {json.dumps(invoice_json, indent=2)}
 
+Linked purchase order from system records (primary evidence when present):
+{json.dumps(purchase_order_json, indent=2) if purchase_order_json is not None else "null"}
+
 DECISION RULES (apply in order; these override general caution):
 
-1. Purchase order / contract matching (billing claims):
-   - If the customer provided a purchase order (PO), contract, or similar supporting document in the conversation, compare it against the invoice on file.
+1. System purchase order is primary evidence:
+   - If a linked purchase order is present in system records, treat it as primary evidence for billing validation.
+   - Compare the invoice on file against that linked purchase order before relying on customer-supplied attachments.
+   - Do NOT choose NEED_MORE_INFO solely to ask the customer for a PO when the linked system purchase order is already present.
+   - When line items, quantities, unit rates/prices, subtotal, tax rate, and tax amount on the invoice align with the linked system purchase order, the billing dispute is resolved: choose COMPANY_CORRECT for those billing claims.
+
+2. Purchase order / contract matching from customer-provided documents:
+   - If no linked system purchase order is present, but the customer provided a purchase order (PO), contract, or similar supporting document in the conversation, compare it against the invoice on file.
    - When line items, quantities, unit rates/prices, subtotal, tax rate, and tax amount on the invoice align with the PO/contract, the billing dispute is resolved: choose COMPANY_CORRECT for those billing claims.
    - Do NOT choose NEED_MORE_INFO and do NOT ask for additional tax, pricing, or line-item documentation when the PO/contract and invoice already agree on those fields.
 
-2. When to use NEED_MORE_INFO (billing only):
+3. When to use NEED_MORE_INFO (billing only):
    - Use NEED_MORE_INFO only when essential evidence is still missing AND the invoice on file cannot be validated against documents the customer has already provided.
+   - If a linked system purchase order is present, that evidence is not missing. Only use NEED_MORE_INFO if some other essential billing fact still cannot be verified from the invoice on file plus the linked system purchase order.
    - Examples: no PO/contract was supplied and amounts cannot be verified; customer-provided document is illegible or incomplete; disputed fields cannot be compared because key values are absent from both invoice and supplied documents.
    - Do NOT use NEED_MORE_INFO merely because the customer disagrees — if their supplied PO/contract supports the invoice as issued, that is COMPANY_CORRECT.
 
-3. Multi-issue disputes (billing + non-billing, e.g. tax/pricing AND late delivery):
+4. Multi-issue disputes (billing + non-billing, e.g. tax/pricing AND late delivery):
    - Evaluate billing claims (tax, pricing, quantity, line items) separately from operational claims (late delivery, quality, receipt date).
-   - If billing claims are verified as COMPANY_CORRECT against the PO/contract and invoice, choose COMPANY_CORRECT even when a separate operational issue (such as missing delivery/receipt date) cannot yet be verified.
-   - In reasoning, state clearly that billing was reviewed and matches the PO/contract; note any unresolved operational concern without requesting duplicate billing documentation.
+   - If billing claims are verified as COMPANY_CORRECT against the linked system purchase order or other PO/contract evidence and invoice, choose COMPANY_CORRECT even when a separate operational issue (such as missing delivery/receipt date) cannot yet be verified.
+   - In reasoning, state clearly that billing was reviewed and matches the linked system purchase order or other PO/contract evidence; note any unresolved operational concern without requesting duplicate billing documentation.
    - Do not withhold COMPANY_CORRECT on billing because an unrelated delivery or quality detail is still outstanding.
 
 You must determine one of the following resolution outcomes:
@@ -157,6 +189,7 @@ Expected JSON Schema:
                     "input_payload": {
                         "raw_customer_text": raw_customer_text,
                         "invoice_json": invoice_json,
+                        "purchase_order_json": purchase_order_json,
                     },
                     "output_payload": parsed,
                     "latency": completion.latency,
@@ -168,7 +201,11 @@ Expected JSON Schema:
 
         # Regex Fallback
         start_time = time.time()
-        fallback_res = cls._regex_fallback(raw_customer_text, invoice_json)
+        fallback_res = cls._regex_fallback(
+            raw_customer_text,
+            invoice_json,
+            purchase_order_json,
+        )
         latency = time.time() - start_time
 
         return {
@@ -181,6 +218,7 @@ Expected JSON Schema:
                 "input_payload": {
                     "raw_customer_text": raw_customer_text,
                     "invoice_json": invoice_json,
+                    "purchase_order_json": purchase_order_json,
                 },
                 "output_payload": fallback_res,
                 "latency": latency,

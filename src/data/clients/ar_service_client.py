@@ -49,9 +49,11 @@ class ARServiceClient:
             raise ARServiceClientException(
                 f"AR Service HTTP error: {e.response.text}",
                 status_code=e.response.status_code,
-            )
+            ) from e
         except Exception as e:
-            raise ARServiceClientException(f"AR Service communication error: {str(e)}")
+            raise ARServiceClientException(
+                f"AR Service communication error: {str(e)}"
+            ) from e
 
     async def get_invoice_details(
         self, invoice_id: UUID, custom_token: str | None = None
@@ -72,6 +74,44 @@ class ARServiceClient:
             invoice["items"] = []
             return invoice
 
+    async def get_purchase_order(
+        self, po_id: UUID, custom_token: str | None = None
+    ) -> dict:
+        """Fetch full purchase order details, including line items when available."""
+        url = f"{self.base_url}/api/v1/purchase-orders/{po_id}"
+        headers = self._get_headers(custom_token)
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(url, headers=headers, timeout=5.0)
+                if resp.status_code == 404:
+                    raise ARServiceClientException(
+                        f"Purchase order {po_id} not found in AR.", status_code=404
+                    )
+                resp.raise_for_status()
+                purchase_order = resp.json()
+        except httpx.HTTPStatusError as e:
+            raise ARServiceClientException(
+                f"AR Service HTTP error: {e.response.text}",
+                status_code=e.response.status_code,
+            ) from e
+        except ARServiceClientException:
+            raise
+        except Exception as e:
+            raise ARServiceClientException(
+                f"AR Service communication error: {str(e)}"
+            ) from e
+
+        items_url = f"{url}/items"
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(items_url, headers=headers, timeout=5.0)
+                resp.raise_for_status()
+                purchase_order["items"] = resp.json()
+        except Exception:
+            purchase_order["items"] = []
+
+        return purchase_order
+
     async def get_customer(
         self, customer_id: UUID, custom_token: str | None = None
     ) -> dict:
@@ -91,9 +131,11 @@ class ARServiceClient:
             raise ARServiceClientException(
                 f"AR Service HTTP error: {e.response.text}",
                 status_code=e.response.status_code,
-            )
+            ) from e
         except Exception as e:
-            raise ARServiceClientException(f"AR Service communication error: {str(e)}")
+            raise ARServiceClientException(
+                f"AR Service communication error: {str(e)}"
+            ) from e
 
     async def get_payment_status(
         self, invoice_id: UUID, custom_token: str | None = None
@@ -124,9 +166,11 @@ class ARServiceClient:
             raise ARServiceClientException(
                 f"AR Service HTTP error: {e.response.text}",
                 status_code=e.response.status_code,
-            )
+            ) from e
         except Exception as e:
-            raise ARServiceClientException(f"AR Service communication error: {str(e)}")
+            raise ARServiceClientException(
+                f"AR Service communication error: {str(e)}"
+            ) from e
 
     async def pause_collections(
         self, invoice_id: UUID, custom_token: str | None = None
@@ -143,9 +187,11 @@ class ARServiceClient:
             raise ARServiceClientException(
                 f"AR Service HTTP error: {e.response.text}",
                 status_code=e.response.status_code,
-            )
+            ) from e
         except Exception as e:
-            raise ARServiceClientException(f"AR Service communication error: {str(e)}")
+            raise ARServiceClientException(
+                f"AR Service communication error: {str(e)}"
+            ) from e
 
     async def resume_collections(
         self, invoice_id: UUID, custom_token: str | None = None
@@ -162,9 +208,11 @@ class ARServiceClient:
             raise ARServiceClientException(
                 f"AR Service HTTP error: {e.response.text}",
                 status_code=e.response.status_code,
-            )
+            ) from e
         except Exception as e:
-            raise ARServiceClientException(f"AR Service communication error: {str(e)}")
+            raise ARServiceClientException(
+                f"AR Service communication error: {str(e)}"
+            ) from e
 
     async def amend_invoice(
         self,
@@ -190,11 +238,13 @@ class ARServiceClient:
             raise ARServiceClientException(
                 f"AR Service HTTP error: {e.response.text}",
                 status_code=e.response.status_code,
-            )
+            ) from e
         except ARServiceClientException:
             raise
         except Exception as e:
-            raise ARServiceClientException(f"AR Service communication error: {str(e)}")
+            raise ARServiceClientException(
+                f"AR Service communication error: {str(e)}"
+            ) from e
 
     async def get_invoice_versions(
         self, invoice_id: UUID, custom_token: str | None = None
@@ -211,9 +261,11 @@ class ARServiceClient:
             raise ARServiceClientException(
                 f"AR Service HTTP error: {e.response.text}",
                 status_code=e.response.status_code,
-            )
+            ) from e
         except Exception as e:
-            raise ARServiceClientException(f"AR Service communication error: {str(e)}")
+            raise ARServiceClientException(
+                f"AR Service communication error: {str(e)}"
+            ) from e
 
     async def lookup_invoice_by_number(
         self, invoice_number: str, custom_token: str | None = None
@@ -274,8 +326,10 @@ class ARServiceClient:
             raise ARServiceClientException(
                 f"AR Service HTTP error: {e.response.text}",
                 status_code=e.response.status_code,
-            )
+            ) from e
         except ARServiceClientException:
             raise
         except Exception as e:
-            raise ARServiceClientException(f"AR Service communication error: {str(e)}")
+            raise ARServiceClientException(
+                f"AR Service communication error: {str(e)}"
+            ) from e

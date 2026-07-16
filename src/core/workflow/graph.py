@@ -965,7 +965,7 @@ async def collections_node(
 async def invoice_fetcher_node(
     state: DisputeWorkflowState, config: RunnableConfig
 ) -> dict[str, Any]:
-    """Fetches full invoice details and stores evidence snapshot."""
+    """Fetches invoice details and any linked purchase order evidence."""
     logger.info("[Node Start] invoice_fetcher_node")
     db = config["configurable"]["db"]
     dispute_id = state["dispute_id"]
@@ -980,6 +980,8 @@ async def invoice_fetcher_node(
 
     formatted_details = {
         "invoice_number": inv_details.get("invoice_number", ""),
+        "po_id": inv_details.get("po_id"),
+        "po_number": inv_details.get("po_number"),
         "customer_name": inv_details.get("customer", {}).get("customer_name", "")
         if isinstance(inv_details.get("customer"), dict)
         else inv_details.get("customer_name_original", ""),
@@ -992,6 +994,21 @@ async def invoice_fetcher_node(
         "items": inv_details.get("items", []),
     }
 
+    purchase_order_json: dict[str, Any] | None = None
+    raw_po_id = inv_details.get("po_id")
+    if raw_po_id:
+        try:
+            purchase_order_json = await ar_client.get_purchase_order(
+                UUID(str(raw_po_id))
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to fetch purchase order %s for dispute %s: %s",
+                raw_po_id,
+                dispute_id,
+                exc,
+            )
+
     snap_repo = EvidenceSnapshotRepository(db)
     await snap_repo.create_evidence_snapshot(
         dispute_id=dispute_id,
@@ -1001,6 +1018,7 @@ async def invoice_fetcher_node(
 
     metadata = dict(state.get("metadata") or {})
     metadata["invoice_json"] = formatted_details
+    metadata["purchase_order_json"] = purchase_order_json
 
     return {
         "metadata": metadata,
@@ -1031,10 +1049,12 @@ async def amendment_resolution_node(
     )
 
     invoice_json = state.get("metadata", {}).get("invoice_json", {})
+    purchase_order_json = state.get("metadata", {}).get("purchase_order_json")
 
     agent_res = await AmendmentResolutionAgent.resolve_amendment(
         raw_customer_text=raw_customer_text,
         invoice_json=invoice_json,
+        purchase_order_json=purchase_order_json,
         dispute_category=dispute.dispute_category,
     )
 
