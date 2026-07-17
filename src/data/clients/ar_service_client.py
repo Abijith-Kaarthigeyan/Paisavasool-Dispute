@@ -112,6 +112,34 @@ class ARServiceClient:
 
         return purchase_order
 
+    async def get_purchase_order_grns(
+        self, po_id: UUID, custom_token: str | None = None
+    ) -> list[dict]:
+        """Fetch goods receipt notes linked to a purchase order."""
+        url = f"{self.base_url}/api/v1/purchase-orders/{po_id}/grns"
+        headers = self._get_headers(custom_token)
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(url, headers=headers, timeout=5.0)
+                if resp.status_code == 404:
+                    raise ARServiceClientException(
+                        f"Purchase order {po_id} not found in AR.", status_code=404
+                    )
+                resp.raise_for_status()
+                data = resp.json()
+                return data.get("goods_receipt_notes", [])
+        except httpx.HTTPStatusError as e:
+            raise ARServiceClientException(
+                f"AR Service HTTP error: {e.response.text}",
+                status_code=e.response.status_code,
+            ) from e
+        except ARServiceClientException:
+            raise
+        except Exception as e:
+            raise ARServiceClientException(
+                f"AR Service communication error: {str(e)}"
+            ) from e
+
     async def get_customer(
         self, customer_id: UUID, custom_token: str | None = None
     ) -> dict:

@@ -88,6 +88,31 @@ class DisputeMailAgent:
                     "document supporting the requested change."
                 )
 
+        if dispute_category == "QUALITY":
+            if outcome == "CUSTOMER_CORRECT":
+                return (
+                    "CUSTOMER_CORRECT (quality): Acknowledge that the quality concern was "
+                    "validated against goods receipt / purchase order records after associate "
+                    "review. Summarize next steps such as credit, replacement, or RMA follow-up "
+                    "in plain language. Do not invent QC findings not supported by the case."
+                )
+            if outcome == "COMPANY_CORRECT":
+                return (
+                    "COMPANY_CORRECT (quality): Explain that after reviewing goods receipt notes "
+                    "and purchase order records (and associate confirmation), we could not "
+                    "substantiate the quality claim. State that the invoice remains as issued "
+                    "unless they provide additional evidence. Offer to re-review if they share "
+                    "photos, batch/lot details, or affected quantities."
+                )
+            if outcome == "NEED_MORE_INFO":
+                request = info_request or (
+                    "photos of the issue, affected product/SKU, quantity, and batch or lot details"
+                )
+                return (
+                    f"NEED_MORE_INFO (quality): Clearly request: {request}. Ask the customer "
+                    "to reply with those details and their invoice number."
+                )
+
         if outcome == "CUSTOMER_CORRECT":
             return (
                 "CUSTOMER_CORRECT: Acknowledge the customer's concern was validated and "
