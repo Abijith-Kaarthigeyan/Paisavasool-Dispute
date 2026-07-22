@@ -1,4 +1,4 @@
-"""Tests for the GRN-backed quality dispute workflow and routing regressions."""
+"""Tests for the GRN-backed late delivery dispute workflow and routing."""
 
 import json
 from types import SimpleNamespace
@@ -10,16 +10,14 @@ from langgraph.graph import END
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.workflow.graph import (
-    quality_evidence_fetcher_node,
-    quality_investigation_node,
-    route_after_amendment_resolution,
-    route_after_quality_evidence,
-    route_after_quality_investigation,
-    route_after_waiting_approval,
+    late_delivery_evidence_fetcher_node,
+    late_delivery_investigation_node,
+    route_after_late_delivery_evidence,
+    route_after_late_delivery_investigation,
     route_collections_destination,
     waiting_approval_node,
 )
-from src.core.workflow.quality_checker_agent import QualityCheckerAgent
+from src.core.workflow.late_delivery_agent import LateDeliveryAgent
 from src.data.repositories.case_repository import CaseRepository
 from src.data.repositories.dispute_repository import DisputeRepository
 from src.data.repositories.other_repositories import EvidenceSnapshotRepository
@@ -29,19 +27,19 @@ from src.data.repositories.recommendation_repository import RecommendationReposi
 async def _create_dispute(
     db: AsyncSession,
     *,
-    category: str = "QUALITY",
+    category: str = "LATE_DELIVERY",
     status: str = "OPEN",
-    customer_text: str = "The delivered widgets were damaged.",
+    customer_text: str = "The shipment arrived later than promised.",
 ):
     suffix = uuid4().hex[:12]
     case = await CaseRepository(db).create_case(
-        case_number=f"CASE-QUALITY-{suffix}",
-        customer_email="quality-customer@example.com",
-        email_subject="Damaged goods",
+        case_number=f"CASE-LATE-{suffix}",
+        customer_email="late-customer@example.com",
+        email_subject="Late delivery",
         email_body=customer_text,
     )
     dispute = await DisputeRepository(db).create_dispute(
-        dispute_number=f"DISP-QUALITY-{suffix}",
+        dispute_number=f"DISP-LATE-{suffix}",
         case_id=case.id,
         invoice_id=uuid4(),
         invoice_number=f"INV-{suffix}",
@@ -69,10 +67,10 @@ def _config(db: AsyncSession, dispute_id) -> dict:
         "CUSTOMER_CORRECT",
         "COMPANY_CORRECT",
         "NEED_MORE_INFO",
-        "ESCALATE_TO_QUALITY_TEAM",
+        "ESCALATE_TO_LOGISTICS_TEAM",
     ],
 )
-async def test_quality_checker_agent_accepts_supported_outcomes(outcome):
+async def test_late_delivery_agent_accepts_supported_outcomes(outcome):
     completion = SimpleNamespace(
         content=json.dumps(
             {
@@ -87,15 +85,24 @@ async def test_quality_checker_agent_accepts_supported_outcomes(outcome):
     )
 
     with patch(
-        "src.core.workflow.quality_checker_agent.generate_text_completion",
+        "src.core.workflow.late_delivery_agent.generate_text_completion",
         new_callable=AsyncMock,
         return_value=completion,
     ):
-        result = await QualityCheckerAgent.resolve_quality(
-            raw_customer_text="Two units arrived damaged.",
+        result = await LateDeliveryAgent.resolve_late_delivery(
+            raw_customer_text="Delivery was promised by March 1 but arrived March 10.",
             invoice_json={"invoice_number": "INV-1"},
-            purchase_order_json={"po_number": "PO-1"},
-            grns_json=[{"grn_number": "GRN-1", "status": "LINKED"}],
+            purchase_order_json={
+                "po_number": "PO-1",
+                "requested_delivery_date": "2026-03-01",
+            },
+            grns_json=[
+                {
+                    "grn_number": "GRN-1",
+                    "status": "LINKED",
+                    "grn_date": "2026-03-10",
+                }
+            ],
         )
 
     assert result["resolution_outcome"] == outcome
@@ -104,7 +111,7 @@ async def test_quality_checker_agent_accepts_supported_outcomes(outcome):
 
 
 @pytest.mark.asyncio
-async def test_quality_checker_agent_invalid_outcome_escalates():
+async def test_late_delivery_agent_invalid_outcome_escalates():
     completion = SimpleNamespace(
         content=json.dumps(
             {
@@ -119,41 +126,129 @@ async def test_quality_checker_agent_invalid_outcome_escalates():
     )
 
     with patch(
-        "src.core.workflow.quality_checker_agent.generate_text_completion",
+        "src.core.workflow.late_delivery_agent.generate_text_completion",
         new_callable=AsyncMock,
         return_value=completion,
     ):
-        result = await QualityCheckerAgent.resolve_quality(
-            raw_customer_text="The shipment has a quality problem.",
+        result = await LateDeliveryAgent.resolve_late_delivery(
+            raw_customer_text="The shipment was late.",
             invoice_json={},
-            purchase_order_json={},
-            grns_json=[{"grn_number": "GRN-1", "status": "LINKED"}],
+            purchase_order_json={"requested_delivery_date": "2026-03-01"},
+            grns_json=[
+                {
+                    "grn_number": "GRN-1",
+                    "status": "LINKED",
+                    "grn_date": "2026-03-10",
+                }
+            ],
         )
 
-    assert result["resolution_outcome"] == "ESCALATE_TO_QUALITY_TEAM"
+    assert result["resolution_outcome"] == "ESCALATE_TO_LOGISTICS_TEAM"
 
 
 @pytest.mark.asyncio
-async def test_quality_checker_agent_fallback_without_grn_escalates():
+async def test_late_delivery_agent_fallback_late_grn_is_customer_correct():
     with patch(
-        "src.core.workflow.quality_checker_agent.generate_text_completion",
+        "src.core.workflow.late_delivery_agent.generate_text_completion",
         new_callable=AsyncMock,
         return_value=None,
     ):
-        result = await QualityCheckerAgent.resolve_quality(
-            raw_customer_text="The goods were damaged.",
+        result = await LateDeliveryAgent.resolve_late_delivery(
+            raw_customer_text="Delivery was late.",
             invoice_json={"invoice_number": "INV-1"},
-            purchase_order_json={"po_number": "PO-1"},
-            grns_json=[],
+            purchase_order_json={
+                "po_number": "PO-1",
+                "requested_delivery_date": "2026-03-01",
+            },
+            grns_json=[
+                {
+                    "grn_number": "GRN-1",
+                    "status": "LINKED",
+                    "grn_date": "2026-03-10",
+                }
+            ],
         )
 
-    assert result["resolution_outcome"] == "ESCALATE_TO_QUALITY_TEAM"
+    assert result["resolution_outcome"] == "CUSTOMER_CORRECT"
     assert result["agent_run_details"]["status"] == "FALLBACK"
     assert result["agent_run_details"]["model"] == "regex_fallback"
 
 
 @pytest.mark.asyncio
-async def test_quality_evidence_without_po_routes_to_department(
+async def test_late_delivery_agent_fallback_on_time_grn_is_company_correct():
+    with patch(
+        "src.core.workflow.late_delivery_agent.generate_text_completion",
+        new_callable=AsyncMock,
+        return_value=None,
+    ):
+        result = await LateDeliveryAgent.resolve_late_delivery(
+            raw_customer_text="Delivery was late.",
+            invoice_json={"invoice_number": "INV-1"},
+            purchase_order_json={
+                "po_number": "PO-1",
+                "requested_delivery_date": "2026-03-10",
+            },
+            grns_json=[
+                {
+                    "grn_number": "GRN-1",
+                    "status": "LINKED",
+                    "grn_date": "2026-03-01",
+                }
+            ],
+        )
+
+    assert result["resolution_outcome"] == "COMPANY_CORRECT"
+    assert result["agent_run_details"]["status"] == "FALLBACK"
+
+
+@pytest.mark.asyncio
+async def test_late_delivery_agent_fallback_without_promised_date_needs_more_info():
+    with patch(
+        "src.core.workflow.late_delivery_agent.generate_text_completion",
+        new_callable=AsyncMock,
+        return_value=None,
+    ):
+        result = await LateDeliveryAgent.resolve_late_delivery(
+            raw_customer_text="The shipment was late.",
+            invoice_json={"invoice_number": "INV-1"},
+            purchase_order_json={"po_number": "PO-1"},
+            grns_json=[
+                {
+                    "grn_number": "GRN-1",
+                    "status": "LINKED",
+                    "grn_date": "2026-03-10",
+                }
+            ],
+        )
+
+    assert result["resolution_outcome"] == "NEED_MORE_INFO"
+    assert result["agent_run_details"]["status"] == "FALLBACK"
+
+
+@pytest.mark.asyncio
+async def test_late_delivery_agent_fallback_without_grn_escalates():
+    with patch(
+        "src.core.workflow.late_delivery_agent.generate_text_completion",
+        new_callable=AsyncMock,
+        return_value=None,
+    ):
+        result = await LateDeliveryAgent.resolve_late_delivery(
+            raw_customer_text="The shipment was late.",
+            invoice_json={"invoice_number": "INV-1"},
+            purchase_order_json={
+                "po_number": "PO-1",
+                "requested_delivery_date": "2026-03-01",
+            },
+            grns_json=[],
+        )
+
+    assert result["resolution_outcome"] == "ESCALATE_TO_LOGISTICS_TEAM"
+    assert result["agent_run_details"]["status"] == "FALLBACK"
+    assert result["agent_run_details"]["model"] == "regex_fallback"
+
+
+@pytest.mark.asyncio
+async def test_late_delivery_evidence_without_po_routes_to_department(
     db_session: AsyncSession,
 ):
     _, dispute = await _create_dispute(db_session)
@@ -167,20 +262,20 @@ async def test_quality_evidence_without_po_routes_to_department(
     )
 
     with patch("src.core.workflow.graph.ARServiceClient", return_value=ar_client):
-        result = await quality_evidence_fetcher_node(
+        result = await late_delivery_evidence_fetcher_node(
             {"dispute_id": dispute.id, "metadata": {}},
             _config(db_session, dispute.id),
         )
 
     assert result["resolution_outcome"] == "PENDING_INTERNAL_REVIEW"
-    assert result["metadata"]["quality_fallback_reason"] == "missing_po_id"
-    assert route_after_quality_evidence(result) == "department_contact_node"
+    assert result["metadata"]["late_delivery_fallback_reason"] == "missing_po_id"
+    assert route_after_late_delivery_evidence(result) == "department_contact_node"
     ar_client.get_purchase_order.assert_not_called()
     ar_client.get_purchase_order_grns.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_quality_evidence_without_linked_grn_routes_to_department(
+async def test_late_delivery_evidence_without_linked_grn_routes_to_department(
     db_session: AsyncSession,
 ):
     _, dispute = await _create_dispute(db_session)
@@ -195,25 +290,29 @@ async def test_quality_evidence_without_linked_grn_routes_to_department(
         }
     )
     ar_client.get_purchase_order = AsyncMock(
-        return_value={"id": str(po_id), "po_number": "PO-1"}
+        return_value={
+            "id": str(po_id),
+            "po_number": "PO-1",
+            "requested_delivery_date": "2026-03-01",
+        }
     )
     ar_client.get_purchase_order_grns = AsyncMock(
         return_value=[{"grn_number": "GRN-UNLINKED", "status": "UNLINKED"}]
     )
 
     with patch("src.core.workflow.graph.ARServiceClient", return_value=ar_client):
-        result = await quality_evidence_fetcher_node(
+        result = await late_delivery_evidence_fetcher_node(
             {"dispute_id": dispute.id, "metadata": {}},
             _config(db_session, dispute.id),
         )
 
     assert result["metadata"]["grns_json"] == []
-    assert result["metadata"]["quality_fallback_reason"] == "no_linked_grns"
-    assert route_after_quality_evidence(result) == "department_contact_node"
+    assert result["metadata"]["late_delivery_fallback_reason"] == "no_linked_grns"
+    assert route_after_late_delivery_evidence(result) == "department_contact_node"
 
 
 @pytest.mark.asyncio
-async def test_quality_evidence_with_linked_grn_routes_to_investigation(
+async def test_late_delivery_evidence_with_linked_grn_routes_to_investigation(
     db_session: AsyncSession,
 ):
     _, dispute = await _create_dispute(db_session)
@@ -222,7 +321,7 @@ async def test_quality_evidence_with_linked_grn_routes_to_investigation(
         "id": str(uuid4()),
         "grn_number": "GRN-LINKED",
         "status": "LINKED",
-        "notes": "Two cartons damaged",
+        "grn_date": "2026-03-10",
     }
     ar_client = MagicMock()
     ar_client.get_invoice_details = AsyncMock(
@@ -234,7 +333,11 @@ async def test_quality_evidence_with_linked_grn_routes_to_investigation(
         }
     )
     ar_client.get_purchase_order = AsyncMock(
-        return_value={"id": str(po_id), "po_number": "PO-1"}
+        return_value={
+            "id": str(po_id),
+            "po_number": "PO-1",
+            "requested_delivery_date": "2026-03-01",
+        }
     )
     ar_client.get_purchase_order_grns = AsyncMock(
         return_value=[
@@ -244,52 +347,63 @@ async def test_quality_evidence_with_linked_grn_routes_to_investigation(
     )
 
     with patch("src.core.workflow.graph.ARServiceClient", return_value=ar_client):
-        result = await quality_evidence_fetcher_node(
+        result = await late_delivery_evidence_fetcher_node(
             {"dispute_id": dispute.id, "metadata": {"preserved": True}},
             _config(db_session, dispute.id),
         )
 
     assert result["metadata"]["grns_json"] == [linked_grn]
     assert result["metadata"]["preserved"] is True
-    assert "quality_fallback" not in result["metadata"]
-    assert route_after_quality_evidence(result) == "quality_investigation_node"
+    assert "late_delivery_fallback" not in result["metadata"]
+    assert (
+        route_after_late_delivery_evidence(result) == "late_delivery_investigation_node"
+    )
 
     snapshots = await EvidenceSnapshotRepository(db_session).list_for_dispute(
         dispute.id
     )
     assert len(snapshots) == 1
-    assert snapshots[0].snapshot_type == "quality_evidence_snapshot"
+    assert snapshots[0].snapshot_type == "late_delivery_evidence_snapshot"
     assert snapshots[0].snapshot_data["grns_json"] == [linked_grn]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("outcome", ["CUSTOMER_CORRECT", "COMPANY_CORRECT"])
-async def test_quality_investigation_always_requires_associate_approval(
+async def test_late_delivery_investigation_always_requires_associate_approval(
     db_session: AsyncSession,
     outcome: str,
 ):
     _, dispute = await _create_dispute(db_session)
     metadata = {
         "invoice_json": {"invoice_number": dispute.invoice_number},
-        "purchase_order_json": {"po_number": "PO-1"},
-        "grns_json": [{"grn_number": "GRN-1", "status": "LINKED"}],
+        "purchase_order_json": {
+            "po_number": "PO-1",
+            "requested_delivery_date": "2026-03-01",
+        },
+        "grns_json": [
+            {
+                "grn_number": "GRN-1",
+                "status": "LINKED",
+                "grn_date": "2026-03-10",
+            }
+        ],
     }
     agent_result = {
         "resolution_outcome": outcome,
         "confidence": 94.0,
-        "reasoning": "Goods receipt evidence supports the recommendation.",
+        "reasoning": "Receipt dates support the recommendation.",
         "agent_run_details": None,
     }
 
     with patch(
-        "src.core.workflow.graph.QualityCheckerAgent.resolve_quality",
+        "src.core.workflow.graph.LateDeliveryAgent.resolve_late_delivery",
         new_callable=AsyncMock,
         return_value=agent_result,
-    ) as resolve_quality:
-        result = await quality_investigation_node(
+    ) as resolve_late_delivery:
+        result = await late_delivery_investigation_node(
             {
                 "dispute_id": dispute.id,
-                "dispute_category": "QUALITY",
+                "dispute_category": "LATE_DELIVERY",
                 "metadata": metadata,
             },
             _config(db_session, dispute.id),
@@ -297,25 +411,29 @@ async def test_quality_investigation_always_requires_associate_approval(
 
     assert result["workflow_status"] == "WAITING_ASSOCIATE_APPROVAL"
     assert result["metadata"]["recommended_outcome"] == outcome
-    assert route_after_quality_investigation(result) == "waiting_approval_node"
-    assert resolve_quality.await_args.kwargs["grns_json"] == metadata["grns_json"]
+    assert route_after_late_delivery_investigation(result) == "waiting_approval_node"
+    assert resolve_late_delivery.await_args.kwargs["grns_json"] == metadata["grns_json"]
 
     recommendation = await RecommendationRepository(
         db_session
     ).get_latest_recommendation(dispute.id)
     assert recommendation is not None
-    assert recommendation.recommended_action.startswith(f"QUALITY_DECISION: {outcome}")
+    assert recommendation.recommended_action.startswith(
+        f"LATE_DELIVERY_DECISION: {outcome}"
+    )
 
 
-def test_quality_investigation_non_decisions_route_safely():
+def test_late_delivery_investigation_non_decisions_route_safely():
     assert (
-        route_after_quality_investigation(
-            {"resolution_outcome": "ESCALATE_TO_QUALITY_TEAM"}
+        route_after_late_delivery_investigation(
+            {"resolution_outcome": "ESCALATE_TO_LOGISTICS_TEAM"}
         )
         == "department_contact_node"
     )
     assert (
-        route_after_quality_investigation({"resolution_outcome": "NEED_MORE_INFO"})
+        route_after_late_delivery_investigation(
+            {"resolution_outcome": "NEED_MORE_INFO"}
+        )
         == END
     )
 
@@ -330,7 +448,7 @@ def test_quality_investigation_non_decisions_route_safely():
         ("COMPANY_CORRECT", "REJECT", "CUSTOMER_CORRECT"),
     ],
 )
-async def test_quality_associate_decision_accepts_or_flips_recommendation(
+async def test_late_delivery_associate_decision_accepts_or_flips_recommendation(
     db_session: AsyncSession,
     recommendation: str,
     decision: str,
@@ -344,7 +462,7 @@ async def test_quality_associate_decision_accepts_or_flips_recommendation(
     result = await waiting_approval_node(
         {
             "dispute_id": dispute.id,
-            "dispute_category": "QUALITY",
+            "dispute_category": "LATE_DELIVERY",
             "resolution_outcome": decision,
             "metadata": {"recommended_outcome": recommendation},
         },
@@ -358,7 +476,11 @@ async def test_quality_associate_decision_accepts_or_flips_recommendation(
     assert dispute.status == "RESOLVED"
 
 
-def test_collections_routes_quality_without_changing_amendment_or_late_delivery():
+def test_collections_routes_late_delivery_without_changing_quality_or_amendment():
+    assert (
+        route_collections_destination({"dispute_category": "LATE_DELIVERY"})
+        == "late_delivery_evidence_fetcher_node"
+    )
     assert (
         route_collections_destination({"dispute_category": "QUALITY"})
         == "quality_evidence_fetcher_node"
@@ -367,70 +489,3 @@ def test_collections_routes_quality_without_changing_amendment_or_late_delivery(
         route_collections_destination({"dispute_category": "AMENDMENT"})
         == "invoice_fetcher_node"
     )
-    assert (
-        route_collections_destination({"dispute_category": "LATE_DELIVERY"})
-        == "late_delivery_evidence_fetcher_node"
-    )
-
-
-def test_amendment_routing_regression():
-    assert (
-        route_after_amendment_resolution({"resolution_outcome": "CUSTOMER_CORRECT"})
-        == "waiting_approval_node"
-    )
-    assert (
-        route_after_amendment_resolution({"resolution_outcome": "COMPANY_CORRECT"})
-        == "mail_agent_node"
-    )
-    assert (
-        route_after_waiting_approval(
-            {
-                "dispute_category": "AMENDMENT",
-                "resolution_outcome": "CUSTOMER_CORRECT",
-            }
-        )
-        == "apply_amendment_node"
-    )
-    assert (
-        route_after_waiting_approval(
-            {
-                "dispute_category": "AMENDMENT",
-                "resolution_outcome": "COMPANY_CORRECT",
-            }
-        )
-        == "mail_agent_node"
-    )
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("decision", "expected"),
-    [
-        ("APPROVE", "CUSTOMER_CORRECT"),
-        ("REJECT", "COMPANY_CORRECT"),
-    ],
-)
-async def test_amendment_approval_semantics_regression(
-    db_session: AsyncSession,
-    decision: str,
-    expected: str,
-):
-    _, dispute = await _create_dispute(
-        db_session,
-        category="AMENDMENT",
-        status="WAITING_ASSOCIATE_APPROVAL",
-    )
-
-    result = await waiting_approval_node(
-        {
-            "dispute_id": dispute.id,
-            "dispute_category": "AMENDMENT",
-            "resolution_outcome": decision,
-            "metadata": {},
-        },
-        _config(db_session, dispute.id),
-    )
-
-    assert result["resolution_outcome"] == expected
-    await db_session.refresh(dispute)
-    assert dispute.resolution_outcome == expected

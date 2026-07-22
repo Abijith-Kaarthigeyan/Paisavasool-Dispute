@@ -24,6 +24,7 @@ from src.core.services.workflow_context_service import WorkflowContextService
 from src.core.workflow.amendment_agent import AmendmentResolutionAgent
 from src.core.workflow.checkpointer import DbWorkflowCheckpointer
 from src.core.workflow.evidence_service import EvidenceSnapshotService
+from src.core.workflow.late_delivery_agent import LateDeliveryAgent
 from src.core.workflow.mail_agent import DisputeMailAgent
 from src.core.workflow.payment_reference_agent import PaymentReferenceExtractionAgent
 from src.core.workflow.quality_checker_agent import QualityCheckerAgent
@@ -1425,6 +1426,268 @@ async def quality_investigation_node(
     }
 
 
+async def late_delivery_evidence_fetcher_node(
+    state: DisputeWorkflowState, config: RunnableConfig
+) -> dict[str, Any]:
+    """Fetches invoice, PO, and linked GRNs for LATE_DELIVERY disputes; flags incomplete chains."""
+    logger.info("[Node Start] late_delivery_evidence_fetcher_node")
+    db = config["configurable"]["db"]
+    dispute_id = state["dispute_id"]
+
+    dispute_repo = DisputeRepository(db)
+    dispute = await dispute_repo.get_by_id(dispute_id)
+    if not dispute:
+        return {}
+
+    metadata = dict(state.get("metadata") or {})
+    ar_client = ARServiceClient()
+
+    def _fallback_result(reason: str) -> dict[str, Any]:
+        metadata["late_delivery_fallback"] = "department"
+        metadata["late_delivery_fallback_reason"] = reason
+        return {
+            "metadata": metadata,
+            "resolution_outcome": "PENDING_INTERNAL_REVIEW",
+            "workflow_status": "LATE_DELIVERY_EVIDENCE_INCOMPLETE",
+            "current_node": "late_delivery_evidence_fetcher_node",
+        }
+
+    if not dispute.invoice_id:
+        logger.warning(
+            "LATE_DELIVERY dispute %s has no invoice_id; falling back to department",
+            dispute_id,
+        )
+        return _fallback_result("missing_invoice")
+
+    try:
+        inv_details = await ar_client.get_invoice_details(dispute.invoice_id)
+    except Exception as exc:
+        logger.warning(
+            "Failed to fetch invoice for LATE_DELIVERY dispute %s: %s",
+            dispute_id,
+            exc,
+        )
+        return _fallback_result("invoice_fetch_failed")
+
+    formatted_details = {
+        "invoice_number": inv_details.get("invoice_number", ""),
+        "po_id": inv_details.get("po_id"),
+        "po_number": inv_details.get("po_number"),
+        "customer_name": inv_details.get("customer", {}).get("customer_name", "")
+        if isinstance(inv_details.get("customer"), dict)
+        else inv_details.get("customer_name_original", ""),
+        "invoice_date": inv_details.get("invoice_date", ""),
+        "due_date": inv_details.get("due_date", ""),
+        "subtotal_amount": float(inv_details.get("subtotal_amount", 0)),
+        "tax_amount": float(inv_details.get("tax_amount", 0)),
+        "total_amount": float(inv_details.get("total_amount", 0)),
+        "outstanding_amount": float(inv_details.get("outstanding_amount", 0)),
+        "items": inv_details.get("items", []),
+    }
+    metadata["invoice_json"] = formatted_details
+
+    raw_po_id = inv_details.get("po_id")
+    if not raw_po_id:
+        logger.info(
+            "LATE_DELIVERY dispute %s invoice has no po_id; falling back to department",
+            dispute_id,
+        )
+        return _fallback_result("missing_po_id")
+
+    purchase_order_json: dict[str, Any] | None = None
+    try:
+        purchase_order_json = await ar_client.get_purchase_order(UUID(str(raw_po_id)))
+    except Exception as exc:
+        logger.warning(
+            "Failed to fetch purchase order %s for LATE_DELIVERY dispute %s: %s",
+            raw_po_id,
+            dispute_id,
+            exc,
+        )
+        return _fallback_result("po_fetch_failed")
+
+    metadata["purchase_order_json"] = purchase_order_json
+
+    try:
+        grns_raw = await ar_client.get_purchase_order_grns(UUID(str(raw_po_id)))
+    except Exception as exc:
+        logger.warning(
+            "Failed to fetch GRNs for PO %s on LATE_DELIVERY dispute %s: %s",
+            raw_po_id,
+            dispute_id,
+            exc,
+        )
+        return _fallback_result("grn_fetch_failed")
+
+    linked_grns = [
+        grn for grn in (grns_raw or []) if (grn.get("status") or "").upper() == "LINKED"
+    ]
+    if not linked_grns:
+        logger.info(
+            "LATE_DELIVERY dispute %s has no LINKED GRNs for PO %s; falling back to department",
+            dispute_id,
+            raw_po_id,
+        )
+        metadata["grns_json"] = []
+        return _fallback_result("no_linked_grns")
+
+    metadata["grns_json"] = linked_grns
+    metadata.pop("late_delivery_fallback", None)
+    metadata.pop("late_delivery_fallback_reason", None)
+
+    evidence_snapshot = {
+        "invoice_json": formatted_details,
+        "purchase_order_json": purchase_order_json,
+        "grns_json": linked_grns,
+    }
+    metadata["late_delivery_evidence_snapshot"] = evidence_snapshot
+
+    snap_repo = EvidenceSnapshotRepository(db)
+    await snap_repo.create_evidence_snapshot(
+        dispute_id=dispute_id,
+        snapshot_type="late_delivery_evidence_snapshot",
+        snapshot_data=evidence_snapshot,
+    )
+
+    return {
+        "metadata": metadata,
+        "workflow_status": "LATE_DELIVERY_EVIDENCE_FETCHED",
+        "current_node": "late_delivery_evidence_fetcher_node",
+    }
+
+
+async def late_delivery_investigation_node(
+    state: DisputeWorkflowState, config: RunnableConfig
+) -> dict[str, Any]:
+    """Evaluates late-delivery claims via LateDeliveryAgent; always gates decisions on associate approval."""
+    logger.info("[Node Start] late_delivery_investigation_node")
+    db = config["configurable"]["db"]
+    dispute_id = state["dispute_id"]
+
+    dispute_repo = DisputeRepository(db)
+    dispute = await dispute_repo.get_by_id(dispute_id)
+    if not dispute:
+        return {}
+
+    raw_customer_text = await _conversation_history_service(
+        db
+    ).build_customer_conversation_text(
+        dispute_id,
+        dispute,
+        state_fallback=state,
+    )
+
+    metadata = dict(state.get("metadata") or {})
+    invoice_json = metadata.get("invoice_json", {})
+    purchase_order_json = metadata.get("purchase_order_json")
+    grns_json = metadata.get("grns_json") or []
+
+    agent_res = await LateDeliveryAgent.resolve_late_delivery(
+        raw_customer_text=raw_customer_text,
+        invoice_json=invoice_json,
+        purchase_order_json=purchase_order_json,
+        grns_json=grns_json,
+    )
+
+    run_details = agent_res.get("agent_run_details")
+    if run_details:
+        agent_run_repo = AgentRunRepository(db)
+        agent_run = await agent_run_repo.create_agent_run(
+            dispute_id=dispute_id,
+            agent_name="LateDeliveryAgent",
+            input_payload=run_details.get("input_payload"),
+            status=run_details.get("status"),
+        )
+        agent_run.started_at = datetime.now() - timedelta(
+            seconds=(run_details.get("latency") or 0)
+        )
+        agent_run.completed_at = datetime.now()
+        agent_run.output_payload = {
+            "prompt": run_details.get("prompt"),
+            "output": run_details.get("output_payload"),
+            "latency": run_details.get("latency"),
+            "model": run_details.get("model"),
+            "provider": run_details.get("provider"),
+        }
+        await agent_run_repo.update_agent_run(agent_run)
+
+    outcome = agent_res["resolution_outcome"]
+
+    rec_repo = RecommendationRepository(db)
+    activity_repo = ActivityRepository(db)
+    comment_repo = CommentRepository(db)
+    audit_service = AuditService(activity_repo)
+    rec_service = RecommendationService(rec_repo, audit_service)
+
+    await rec_service.persist_recommendation(
+        dispute_id=dispute_id,
+        recommended_action=(
+            f"LATE_DELIVERY_DECISION: {outcome}. Reason: {agent_res['reasoning']}"
+        ),
+        confidence=agent_res["confidence"],
+        created_by_agent="LateDeliveryAgent",
+    )
+
+    if outcome == "NEED_MORE_INFO":
+        info_request = agent_res["reasoning"]
+        await comment_repo.create_comment(
+            dispute_id=dispute_id,
+            comment=f"Need More Info: {info_request}",
+            comment_type="INTERNAL",
+            created_by=UUID("00000000-0000-0000-0000-000000000101"),
+        )
+
+        old_status = dispute.status
+        dispute.status = "WAITING_CUSTOMER"
+        dispute.resolution_outcome = "NEED_MORE_INFO"
+        await dispute_repo.update_dispute(dispute)
+
+        await _notify_customer_need_more_info(
+            db=db,
+            dispute=dispute,
+            state=state,
+            info_request=info_request,
+        )
+
+        sla_service = SLAService(
+            SLARepository(db), dispute_repo, audit_service, settings
+        )
+        await sla_service.handle_status_change(
+            dispute_id, old_status, "WAITING_CUSTOMER"
+        )
+
+        await audit_service.log_event(
+            dispute_id=dispute_id,
+            action="STATUS_CHANGED",
+            metadata={
+                "old_status": old_status,
+                "new_status": "WAITING_CUSTOMER",
+                "reason": "NEED_MORE_INFO",
+            },
+        )
+
+        raise NodeInterrupt(
+            "Workflow paused: Waiting for customer additional information."
+        )
+
+    if outcome == "ESCALATE_TO_LOGISTICS_TEAM":
+        return {
+            "resolution_outcome": "ESCALATE_TO_LOGISTICS_TEAM",
+            "workflow_status": "LATE_DELIVERY_ESCALATED",
+            "current_node": "late_delivery_investigation_node",
+            "metadata": metadata,
+        }
+
+    # CUSTOMER_CORRECT or COMPANY_CORRECT → always associate approval
+    metadata["recommended_outcome"] = outcome
+    return {
+        "resolution_outcome": outcome,
+        "workflow_status": "WAITING_ASSOCIATE_APPROVAL",
+        "current_node": "late_delivery_investigation_node",
+        "metadata": metadata,
+    }
+
+
 async def reference_extraction_node(
     state: DisputeWorkflowState, config: RunnableConfig
 ) -> dict[str, Any]:
@@ -1902,7 +2165,10 @@ async def waiting_approval_node(
 
     if outcome in ["APPROVE", "EDIT_AND_APPLY", "REJECT"]:
         category = state.get("dispute_category") or dispute.dispute_category
-        if category == "QUALITY" and outcome in ["APPROVE", "REJECT"]:
+        if category in ("QUALITY", "LATE_DELIVERY") and outcome in [
+            "APPROVE",
+            "REJECT",
+        ]:
             recommended = (state.get("metadata") or {}).get("recommended_outcome")
             if recommended not in ("CUSTOMER_CORRECT", "COMPANY_CORRECT"):
                 recommended = "CUSTOMER_CORRECT"
@@ -2095,7 +2361,9 @@ def route_collections_destination(state: DisputeWorkflowState) -> str:
         return "reference_extraction_node"
     elif category == "QUALITY":
         return "quality_evidence_fetcher_node"
-    else:  # LATE_DELIVERY, OTHER, DUPLICATE_INVOICE etc.
+    elif category == "LATE_DELIVERY":
+        return "late_delivery_evidence_fetcher_node"
+    else:  # OTHER, DUPLICATE_INVOICE etc.
         return "department_contact_node"
 
 
@@ -2113,6 +2381,24 @@ def route_after_quality_investigation(state: DisputeWorkflowState) -> str:
     if outcome in ("CUSTOMER_CORRECT", "COMPANY_CORRECT"):
         return "waiting_approval_node"
     if outcome == "ESCALATE_TO_QUALITY_TEAM":
+        return "department_contact_node"
+    return END
+
+
+def route_after_late_delivery_evidence(state: DisputeWorkflowState) -> str:
+    """Routes after late delivery evidence fetch: incomplete chain → department, else investigation."""
+    metadata = state.get("metadata") or {}
+    if metadata.get("late_delivery_fallback") == "department":
+        return "department_contact_node"
+    return "late_delivery_investigation_node"
+
+
+def route_after_late_delivery_investigation(state: DisputeWorkflowState) -> str:
+    """Routes after late delivery investigation agent."""
+    outcome = state.get("resolution_outcome")
+    if outcome in ("CUSTOMER_CORRECT", "COMPANY_CORRECT"):
+        return "waiting_approval_node"
+    if outcome == "ESCALATE_TO_LOGISTICS_TEAM":
         return "department_contact_node"
     return END
 
@@ -2198,6 +2484,12 @@ def create_graph() -> StateGraph:
     workflow.add_node("amendment_resolution_node", amendment_resolution_node)
     workflow.add_node("quality_evidence_fetcher_node", quality_evidence_fetcher_node)
     workflow.add_node("quality_investigation_node", quality_investigation_node)
+    workflow.add_node(
+        "late_delivery_evidence_fetcher_node", late_delivery_evidence_fetcher_node
+    )
+    workflow.add_node(
+        "late_delivery_investigation_node", late_delivery_investigation_node
+    )
     workflow.add_node("reference_extraction_node", reference_extraction_node)
     workflow.add_node("payment_checker_node", payment_checker_node)
     workflow.add_node("department_contact_node", department_contact_node)
@@ -2268,6 +2560,7 @@ def create_graph() -> StateGraph:
             "invoice_fetcher_node": "invoice_fetcher_node",
             "reference_extraction_node": "reference_extraction_node",
             "quality_evidence_fetcher_node": "quality_evidence_fetcher_node",
+            "late_delivery_evidence_fetcher_node": "late_delivery_evidence_fetcher_node",
             "department_contact_node": "department_contact_node",
         },
     )
@@ -2305,6 +2598,25 @@ def create_graph() -> StateGraph:
     workflow.add_conditional_edges(
         "quality_investigation_node",
         route_after_quality_investigation,
+        {
+            "waiting_approval_node": "waiting_approval_node",
+            "department_contact_node": "department_contact_node",
+            END: END,
+        },
+    )
+
+    # Late Delivery Path
+    workflow.add_conditional_edges(
+        "late_delivery_evidence_fetcher_node",
+        route_after_late_delivery_evidence,
+        {
+            "late_delivery_investigation_node": "late_delivery_investigation_node",
+            "department_contact_node": "department_contact_node",
+        },
+    )
+    workflow.add_conditional_edges(
+        "late_delivery_investigation_node",
+        route_after_late_delivery_investigation,
         {
             "waiting_approval_node": "waiting_approval_node",
             "department_contact_node": "department_contact_node",

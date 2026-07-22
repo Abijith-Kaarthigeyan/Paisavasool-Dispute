@@ -5,6 +5,7 @@ from src.core.exceptions.business_exceptions import (
     ForbiddenException,
     SLADetailsNotFoundException,
 )
+from src.core.services.sla_service import SLAService
 from src.core.services.workflow_context_service import WorkflowContextService
 from src.data.models.postgres.activity import DisputeActivity
 from src.data.models.postgres.comment import DisputeComment
@@ -34,6 +35,7 @@ class DisputeService:
         sla_repo: SLARepository,
         workflow_context_service: WorkflowContextService,
         evidence_repo: EvidenceSnapshotRepository,
+        sla_service: SLAService | None = None,
     ):
         self.dispute_repo = dispute_repo
         self.activity_repo = activity_repo
@@ -42,6 +44,7 @@ class DisputeService:
         self.sla_repo = sla_repo
         self.workflow_context_service = workflow_context_service
         self.evidence_repo = evidence_repo
+        self.sla_service = sla_service
 
     async def list_disputes(
         self,
@@ -175,6 +178,12 @@ class DisputeService:
         return await self.comm_repo.get_communications_for_dispute(dispute_id)
 
     async def get_sla(self, dispute_id: UUID) -> DisputeSLA:
+        """Return live SLA progress. Recalculates so UI is not stuck on stale stored %."""
+        if self.sla_service is not None:
+            sla = await self.sla_service.calculate_progress(dispute_id)
+            if sla:
+                return sla
+
         sla = await self.sla_repo.get_by_dispute_id(dispute_id)
         if not sla:
             raise SLADetailsNotFoundException(

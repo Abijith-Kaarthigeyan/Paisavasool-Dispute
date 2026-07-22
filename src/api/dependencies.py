@@ -224,6 +224,7 @@ def get_dispute_service(
     evidence_repo: EvidenceSnapshotRepository = Depends(
         get_evidence_snapshot_repository
     ),
+    sla_service: SLAService = Depends(get_sla_service),
 ) -> DisputeService:
     return DisputeService(
         dispute_repo,
@@ -233,6 +234,7 @@ def get_dispute_service(
         sla_repo,
         workflow_context_service,
         evidence_repo,
+        sla_service,
     )
 
 

@@ -84,6 +84,7 @@ class DisputeRepository:
         *,
         customer_id: UUID | None = None,
         status: str | None = None,
+        statuses: list[str] | tuple[str, ...] | None = None,
         category: str | None = None,
         invoice_number: str | None = None,
         assigned_to: UUID | None = None,
@@ -96,6 +97,8 @@ class DisputeRepository:
             query = query.where(Dispute.customer_id == customer_id)
         if status:
             query = query.where(Dispute.status == status)
+        if statuses:
+            query = query.where(Dispute.status.in_(statuses))
         if exclude_statuses:
             query = query.where(Dispute.status.not_in(exclude_statuses))
         if category:
@@ -128,6 +131,7 @@ class DisputeRepository:
         *,
         customer_id: UUID | None = None,
         status: str | None = None,
+        statuses: list[str] | tuple[str, ...] | None = None,
         category: str | None = None,
         invoice_number: str | None = None,
         assigned_to: UUID | None = None,
@@ -147,6 +151,7 @@ class DisputeRepository:
             query,
             customer_id=customer_id,
             status=status,
+            statuses=statuses,
             category=category,
             invoice_number=invoice_number,
             assigned_to=assigned_to,

@@ -113,6 +113,34 @@ class DisputeMailAgent:
                     "to reply with those details and their invoice number."
                 )
 
+        if dispute_category == "LATE_DELIVERY":
+            if outcome == "CUSTOMER_CORRECT":
+                return (
+                    "CUSTOMER_CORRECT (late delivery): Acknowledge that delivery was late "
+                    "relative to the promised/requested delivery date versus the goods receipt "
+                    "date after associate review. Cite the requested date and receipt date / "
+                    "GRN number when available. Summarize next steps (credit, waiver, or "
+                    "follow-up) in plain language. Never invent ETAs or promised dates."
+                )
+            if outcome == "COMPANY_CORRECT":
+                return (
+                    "COMPANY_CORRECT (late delivery): Explain that after comparing the "
+                    "purchase order requested delivery date with the goods receipt note date "
+                    "(and associate confirmation), delivery was on time or early. Cite those "
+                    "dates / GRN numbers when available. State the invoice remains as issued "
+                    "unless they provide additional evidence of a different promised date. "
+                    "Never invent ETAs."
+                )
+            if outcome == "NEED_MORE_INFO":
+                request = info_request or (
+                    "the promised or requested delivery date that was agreed for this order"
+                )
+                return (
+                    f"NEED_MORE_INFO (late delivery): Clearly request: {request}. Ask the "
+                    "customer to reply with that date and their invoice number. Do not invent "
+                    "or propose an ETA."
+                )
+
         if outcome == "CUSTOMER_CORRECT":
             return (
                 "CUSTOMER_CORRECT: Acknowledge the customer's concern was validated and "

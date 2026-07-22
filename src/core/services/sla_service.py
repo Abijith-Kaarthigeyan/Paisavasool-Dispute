@@ -20,6 +20,16 @@ PAUSE_SLA_TILL_REPLY_STATUSES = frozenset(
         "WAITING_PAYMENT_REVIEW",
     }
 )
+# Statuses whose SLA clock must keep advancing via monitoring / on-read recalculation.
+SLA_MONITORING_STATUSES = (
+    "OPEN",
+    "IN_REVIEW",
+    "WAITING_CUSTOMER",
+    "WAITING_INTERNAL_TEAM",
+    "WAITING_ASSOCIATE_APPROVAL",
+    "WAITING_PAYMENT_REVIEW",
+    "ESCALATED",
+)
 
 
 class SLAService:
@@ -276,7 +286,10 @@ class SLAService:
         if active_elapsed_minutes < 0:
             active_elapsed_minutes = 0.0
 
-        percentage = (active_elapsed_minutes / sla.sla_minutes) * 100.0
+        if sla.sla_minutes <= 0:
+            percentage = 100.0 if active_elapsed_minutes > 0 else 0.0
+        else:
+            percentage = (active_elapsed_minutes / sla.sla_minutes) * 100.0
         sla.current_percentage = round(percentage, 2)
 
         old_status = sla.status
