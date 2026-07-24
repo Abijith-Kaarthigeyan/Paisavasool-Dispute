@@ -83,7 +83,7 @@ async def run_sla_monitoring_async() -> int:
 
         # Include all non-terminal wait states (incl. WAITING_PAYMENT_REVIEW).
         # Filter in SQL so older active disputes are not dropped by a newest-N limit.
-        active_disputes = await dispute_repo.list_disputes(
+        active_disputes, _ = await dispute_repo.list_disputes(
             statuses=SLA_MONITORING_STATUSES,
             limit=10000,
         )

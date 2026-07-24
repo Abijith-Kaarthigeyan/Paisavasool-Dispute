@@ -1,3 +1,4 @@
+from datetime import datetime
 from uuid import UUID
 
 from src.core.exceptions.business_exceptions import CaseNotFoundException
@@ -18,9 +19,27 @@ class CaseService:
         self.dispute_repo = dispute_repo
 
     async def list_cases(
-        self, *, limit: int = 100, offset: int = 0
-    ) -> list[DisputeCase]:
-        return await self.case_repo.list_cases(limit=limit, offset=offset)
+        self,
+        *,
+        status: str | None = None,
+        search: str | None = None,
+        created_at_from: datetime | None = None,
+        created_at_to: datetime | None = None,
+        sort_by: str | None = None,
+        sort_order: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> tuple[list[DisputeCase], int]:
+        return await self.case_repo.list_cases(
+            status=status,
+            search=search,
+            created_at_from=created_at_from,
+            created_at_to=created_at_to,
+            sort_by=sort_by,
+            sort_order=sort_order,
+            limit=limit,
+            offset=offset,
+        )
 
     async def get_case(self, case_id: UUID) -> DisputeCase:
         case = await self.case_repo.get_by_id(case_id)

@@ -675,7 +675,8 @@ async def test_pre_correlation_node_skips_dispute_generation(
     assert result["workflow_status"] == "CORRELATED_EXISTING"
     assert result["metadata"]["resume_dispute_id"] == str(dispute.id)
 
-    disputes_before = len(await dispute_repo.list_disputes())
+    disputes_before, _ = await dispute_repo.list_disputes()
+    disputes_before = len(disputes_before)
     triage_mock_val = {"invoices": [], "confidence": 95.0}
 
     from unittest.mock import AsyncMock
@@ -707,7 +708,8 @@ async def test_pre_correlation_node_skips_dispute_generation(
             config,
         )
 
-    disputes_after = len(await dispute_repo.list_disputes())
+    disputes_after, _ = await dispute_repo.list_disputes()
+    disputes_after = len(disputes_after)
     assert disputes_after == disputes_before
     mock_workflow_delay.assert_not_called()
 
