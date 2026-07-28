@@ -1,11 +1,20 @@
+from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from src.core.services.email_thread_utils import normalize_message_token
 from src.data.models.postgres.case import DisputeCase
+from src.data.repositories.list_query import apply_allowlisted_sort, count_filtered
+
+CASE_SORT_COLUMNS = {
+    "created_at": DisputeCase.created_at,
+    "case_number": DisputeCase.case_number,
+    "customer_email": DisputeCase.customer_email,
+    "status": DisputeCase.status,
+}
 
 
 class CaseRepository:
@@ -32,15 +41,63 @@ class CaseRepository:
         )
         return result.scalar_one_or_none()
 
-    async def list_cases(self, limit: int = 100, offset: int = 0) -> list[DisputeCase]:
-        result = await self.db.execute(
-            select(DisputeCase)
-            .where(DisputeCase.is_deleted.is_(False))
-            .order_by(DisputeCase.created_at.desc())
-            .limit(limit)
-            .offset(offset)
+    def _apply_list_filters(
+        self,
+        query,
+        *,
+        status: str | None = None,
+        search: str | None = None,
+        created_at_from: datetime | None = None,
+        created_at_to: datetime | None = None,
+    ):
+        if status:
+            query = query.where(DisputeCase.status == status)
+        if search and search.strip():
+            term = f"%{search.strip()}%"
+            query = query.where(
+                or_(
+                    DisputeCase.case_number.ilike(term),
+                    DisputeCase.customer_email.ilike(term),
+                    DisputeCase.email_subject.ilike(term),
+                )
+            )
+        if created_at_from:
+            query = query.where(DisputeCase.created_at >= created_at_from)
+        if created_at_to:
+            query = query.where(DisputeCase.created_at <= created_at_to)
+        return query
+
+    async def list_cases(
+        self,
+        *,
+        status: str | None = None,
+        search: str | None = None,
+        created_at_from: datetime | None = None,
+        created_at_to: datetime | None = None,
+        sort_by: str | None = None,
+        sort_order: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> tuple[list[DisputeCase], int]:
+        query = select(DisputeCase).where(DisputeCase.is_deleted.is_(False))
+        query = self._apply_list_filters(
+            query,
+            status=status,
+            search=search,
+            created_at_from=created_at_from,
+            created_at_to=created_at_to,
         )
-        return list(result.scalars().all())
+        total = await count_filtered(self.db, query)
+        query = apply_allowlisted_sort(
+            query,
+            sort_by=sort_by,
+            sort_order=sort_order,
+            columns=CASE_SORT_COLUMNS,
+            default=DisputeCase.created_at,
+        )
+        query = query.limit(limit).offset(offset)
+        result = await self.db.execute(query)
+        return list(result.scalars().unique().all()), total
 
     async def find_by_original_message_id(self, message_id: str) -> DisputeCase | None:
         result = await self.db.execute(

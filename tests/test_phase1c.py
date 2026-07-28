@@ -110,6 +110,7 @@ async def test_amendment_agent_success(mock_openrouter_amendment):
         res = await AmendmentResolutionAgent.resolve_amendment(
             raw_customer_text="Tax on my invoice is wrong",
             invoice_json={"total": 118},
+            purchase_order_json=None,
             dispute_category="AMENDMENT",
         )
         assert res["resolution_outcome"] == "CUSTOMER_CORRECT"
@@ -121,18 +122,46 @@ async def test_amendment_agent_success(mock_openrouter_amendment):
 async def test_amendment_agent_regex_fallback():
     """Verifies regex fallback on missing keys or failures."""
     with (
-        patch("src.core.config.settings.settings.OPENROUTER_API_KEY", ""),
-        patch("src.core.config.settings.settings.GEMINI_API_KEY", ""),
-        patch("src.core.config.settings.settings.GROQ_API_KEY", ""),
+        patch(
+            "src.core.workflow.amendment_agent.generate_text_completion",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
     ):
         res = await AmendmentResolutionAgent.resolve_amendment(
             raw_customer_text="Please adjust pricing or tax",
             invoice_json={"total": 118},
+            purchase_order_json=None,
             dispute_category="AMENDMENT",
         )
         assert res["resolution_outcome"] == "NEED_MORE_INFO"
         assert res["confidence"] == 75.0
         assert "fallback" in res["reasoning"].lower()
+
+
+@pytest.mark.asyncio
+async def test_amendment_agent_regex_fallback_uses_system_po():
+    """Fallback should not request a PO from the customer when a linked PO is already present."""
+    with (
+        patch(
+            "src.core.workflow.amendment_agent.generate_text_completion",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+    ):
+        res = await AmendmentResolutionAgent.resolve_amendment(
+            raw_customer_text="Tax on this invoice looks wrong.",
+            invoice_json={"invoice_number": "INV-1", "total_amount": 118},
+            purchase_order_json={
+                "po_number": "PO-42",
+                "total_amount": 118,
+                "items": [],
+            },
+            dispute_category="AMENDMENT",
+        )
+        assert res["resolution_outcome"] == "COMPANY_CORRECT"
+        assert "PO-42" in res["reasoning"]
+        assert "should be requested" in res["reasoning"]
 
 
 # --- 2. PAYMENT REFERENCE EXTRACTION AGENT TESTS ---
@@ -164,9 +193,11 @@ async def test_reference_agent_success(mock_openrouter_reference):
 async def test_reference_agent_regex_fallback():
     """Verifies regex fallback pulls bank transaction UTR formats."""
     with (
-        patch("src.core.config.settings.settings.OPENROUTER_API_KEY", ""),
-        patch("src.core.config.settings.settings.GEMINI_API_KEY", ""),
-        patch("src.core.config.settings.settings.GROQ_API_KEY", ""),
+        patch(
+            "src.core.workflow.payment_reference_agent.generate_text_completion",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
     ):
         res = await PaymentReferenceExtractionAgent.extract_reference(
             "Payment ref SBI1234567890123"
@@ -209,9 +240,11 @@ async def test_mail_agent_llm(mock_openrouter_mail):
 async def test_mail_agent_fallback_templates():
     """Verifies template fallback on missing LLM keys."""
     with (
-        patch("src.core.config.settings.settings.OPENROUTER_API_KEY", ""),
-        patch("src.core.config.settings.settings.GEMINI_API_KEY", ""),
-        patch("src.core.config.settings.settings.GROQ_API_KEY", ""),
+        patch(
+            "src.core.workflow.mail_agent.generate_text_completion",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
     ):
         res = await DisputeMailAgent.generate_mail(
             dispute_category="AMENDMENT",
@@ -557,11 +590,28 @@ async def test_e2e_amendment_path(db_session: AsyncSession, seed_users):
     mock_ar.get_invoice_details = AsyncMock(
         return_value={
             "invoice_number": "INV-AMEND-1",
+            "po_id": str(uuid4()),
+            "po_number": "PO-AMEND-1",
             "subtotal_amount": 100,
             "tax_amount": 18,
             "total_amount": 118,
             "outstanding_amount": 118,
             "items": [],
+        }
+    )
+    mock_ar.get_purchase_order = AsyncMock(
+        return_value={
+            "id": str(uuid4()),
+            "po_number": "PO-AMEND-1",
+            "total_amount": 118,
+            "items": [
+                {
+                    "description": "Widget",
+                    "quantity": 2,
+                    "unit_price": 50,
+                    "amount": 100,
+                }
+            ],
         }
     )
     mock_ar.lookup_invoice_by_number = AsyncMock(
@@ -623,7 +673,7 @@ async def test_e2e_amendment_path(db_session: AsyncSession, seed_users):
             "src.core.workflow.amendment_agent.AmendmentResolutionAgent.resolve_amendment",
             new_callable=AsyncMock,
             return_value=mock_amend_outcome,
-        ),
+        ) as mock_resolve_amendment,
         patch(
             "src.core.workflow.mail_agent.DisputeMailAgent.generate_mail",
             new_callable=AsyncMock,
@@ -632,6 +682,10 @@ async def test_e2e_amendment_path(db_session: AsyncSession, seed_users):
     ):
         # 1. First execution: should pause at waiting_approval_node
         await graph.ainvoke(state, config)
+
+        amend_call_kwargs = mock_resolve_amendment.await_args.kwargs
+        assert amend_call_kwargs["purchase_order_json"]["po_number"] == "PO-AMEND-1"
+        mock_ar.get_purchase_order.assert_called_once()
 
         await db_session.refresh(dispute)
         assert dispute.status == "WAITING_ASSOCIATE_APPROVAL"

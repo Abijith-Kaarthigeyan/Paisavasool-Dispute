@@ -18,7 +18,7 @@ from src.core.services.case_attachment_service import CaseAttachmentService
 from src.core.services.conversation_history_service import ConversationHistoryService
 from src.core.services.escalation_service import EscalationService
 from src.core.services.outbound_email_service import OutboundEmailService
-from src.core.services.sla_service import SLAService
+from src.core.services.sla_service import SLA_MONITORING_STATUSES, SLAService
 from src.core.workflow.graph import get_graph
 from src.core.workflow.resume_service import DisputeResumeService
 from src.data.clients.ar_service_client import ARServiceClient
@@ -81,17 +81,12 @@ async def run_sla_monitoring_async() -> int:
             escalation_repo, sla_repo, dispute_repo, audit_service
         )
 
-        # Get open/active disputes
-        active_statuses = [
-            "OPEN",
-            "IN_REVIEW",
-            "WAITING_CUSTOMER",
-            "WAITING_INTERNAL_TEAM",
-            "WAITING_ASSOCIATE_APPROVAL",
-            "ESCALATED",
-        ]
-        disputes = await dispute_repo.list_disputes(limit=1000)
-        active_disputes = [d for d in disputes if d.status in active_statuses]
+        # Include all non-terminal wait states (incl. WAITING_PAYMENT_REVIEW).
+        # Filter in SQL so older active disputes are not dropped by a newest-N limit.
+        active_disputes, _ = await dispute_repo.list_disputes(
+            statuses=SLA_MONITORING_STATUSES,
+            limit=10000,
+        )
 
         count = 0
         for dispute in active_disputes:

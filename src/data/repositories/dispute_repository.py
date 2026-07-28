@@ -9,6 +9,16 @@ from src.core.workflow.triage_agent import DisputeTriageAgent
 from src.data.models.postgres.case import DisputeCase
 from src.data.models.postgres.dispute import Dispute
 from src.data.models.postgres.sla import DisputeSLA
+from src.data.repositories.list_query import apply_allowlisted_sort, count_filtered
+
+DISPUTE_SORT_COLUMNS = {
+    "created_at": Dispute.created_at,
+    "opened_at": Dispute.opened_at,
+    "dispute_number": Dispute.dispute_number,
+    "invoice_number": Dispute.invoice_number,
+    "status": Dispute.status,
+    "dispute_category": Dispute.dispute_category,
+}
 
 
 def _normalize_invoice_number(invoice_number: str) -> str:
@@ -84,6 +94,7 @@ class DisputeRepository:
         *,
         customer_id: UUID | None = None,
         status: str | None = None,
+        statuses: list[str] | tuple[str, ...] | None = None,
         category: str | None = None,
         invoice_number: str | None = None,
         assigned_to: UUID | None = None,
@@ -91,11 +102,17 @@ class DisputeRepository:
         sla_status: str | None = None,
         has_assignee: bool | None = None,
         exclude_statuses: list[str] | None = None,
+        created_at_from: datetime | None = None,
+        created_at_to: datetime | None = None,
+        opened_at_from: datetime | None = None,
+        opened_at_to: datetime | None = None,
     ):
         if customer_id:
             query = query.where(Dispute.customer_id == customer_id)
         if status:
             query = query.where(Dispute.status == status)
+        if statuses:
+            query = query.where(Dispute.status.in_(statuses))
         if exclude_statuses:
             query = query.where(Dispute.status.not_in(exclude_statuses))
         if category:
@@ -121,6 +138,14 @@ class DisputeRepository:
                 DisputeSLA.status == sla_status,
                 DisputeSLA.is_deleted.is_(False),
             )
+        if created_at_from:
+            query = query.where(Dispute.created_at >= created_at_from)
+        if created_at_to:
+            query = query.where(Dispute.created_at <= created_at_to)
+        if opened_at_from:
+            query = query.where(Dispute.opened_at >= opened_at_from)
+        if opened_at_to:
+            query = query.where(Dispute.opened_at <= opened_at_to)
         return query
 
     async def list_disputes(
@@ -128,6 +153,7 @@ class DisputeRepository:
         *,
         customer_id: UUID | None = None,
         status: str | None = None,
+        statuses: list[str] | tuple[str, ...] | None = None,
         category: str | None = None,
         invoice_number: str | None = None,
         assigned_to: UUID | None = None,
@@ -135,9 +161,15 @@ class DisputeRepository:
         sla_status: str | None = None,
         has_assignee: bool | None = None,
         exclude_statuses: list[str] | None = None,
+        created_at_from: datetime | None = None,
+        created_at_to: datetime | None = None,
+        opened_at_from: datetime | None = None,
+        opened_at_to: datetime | None = None,
+        sort_by: str | None = None,
+        sort_order: str | None = None,
         limit: int = 100,
         offset: int = 0,
-    ) -> list[Dispute]:
+    ) -> tuple[list[Dispute], int]:
         query = (
             select(Dispute)
             .options(joinedload(Dispute.sla))
@@ -147,6 +179,7 @@ class DisputeRepository:
             query,
             customer_id=customer_id,
             status=status,
+            statuses=statuses,
             category=category,
             invoice_number=invoice_number,
             assigned_to=assigned_to,
@@ -154,10 +187,22 @@ class DisputeRepository:
             sla_status=sla_status,
             has_assignee=has_assignee,
             exclude_statuses=exclude_statuses,
+            created_at_from=created_at_from,
+            created_at_to=created_at_to,
+            opened_at_from=opened_at_from,
+            opened_at_to=opened_at_to,
         )
-        query = query.order_by(Dispute.created_at.desc()).limit(limit).offset(offset)
+        total = await count_filtered(self.db, query)
+        query = apply_allowlisted_sort(
+            query,
+            sort_by=sort_by,
+            sort_order=sort_order,
+            columns=DISPUTE_SORT_COLUMNS,
+            default=Dispute.created_at,
+        )
+        query = query.limit(limit).offset(offset)
         result = await self.db.execute(query)
-        return list(result.scalars().unique().all())
+        return list(result.scalars().unique().all()), total
 
     async def list_by_assigned_associate(
         self,
@@ -170,9 +215,15 @@ class DisputeRepository:
         search: str | None = None,
         sla_status: str | None = None,
         exclude_statuses: list[str] | None = None,
+        created_at_from: datetime | None = None,
+        created_at_to: datetime | None = None,
+        opened_at_from: datetime | None = None,
+        opened_at_to: datetime | None = None,
+        sort_by: str | None = None,
+        sort_order: str | None = None,
         limit: int = 100,
         offset: int = 0,
-    ) -> list[Dispute]:
+    ) -> tuple[list[Dispute], int]:
         """List disputes assigned to a specific finance associate."""
         query = (
             select(Dispute)
@@ -191,10 +242,22 @@ class DisputeRepository:
             search=search,
             sla_status=sla_status,
             exclude_statuses=exclude_statuses,
+            created_at_from=created_at_from,
+            created_at_to=created_at_to,
+            opened_at_from=opened_at_from,
+            opened_at_to=opened_at_to,
         )
-        query = query.order_by(Dispute.created_at.desc()).limit(limit).offset(offset)
+        total = await count_filtered(self.db, query)
+        query = apply_allowlisted_sort(
+            query,
+            sort_by=sort_by,
+            sort_order=sort_order,
+            columns=DISPUTE_SORT_COLUMNS,
+            default=Dispute.created_at,
+        )
+        query = query.limit(limit).offset(offset)
         result = await self.db.execute(query)
-        return list(result.scalars().unique().all())
+        return list(result.scalars().unique().all()), total
 
     async def list_distinct_invoice_numbers(self, limit: int = 500) -> list[str]:
         result = await self.db.execute(

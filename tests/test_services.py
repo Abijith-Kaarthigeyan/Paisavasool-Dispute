@@ -13,6 +13,7 @@ from src.core.services.escalation_service import EscalationService
 from src.core.services.sla_service import (
     PAUSE_REASON_AWAITING_CUSTOMER_REPLY,
     PAUSE_REASON_WAITING_CUSTOMER,
+    SLA_MONITORING_STATUSES,
     SLAService,
 )
 from src.core.workflow.triage_agent import DisputeTriageAgent
@@ -674,7 +675,8 @@ async def test_pre_correlation_node_skips_dispute_generation(
     assert result["workflow_status"] == "CORRELATED_EXISTING"
     assert result["metadata"]["resume_dispute_id"] == str(dispute.id)
 
-    disputes_before = len(await dispute_repo.list_disputes())
+    disputes_before, _ = await dispute_repo.list_disputes()
+    disputes_before = len(disputes_before)
     triage_mock_val = {"invoices": [], "confidence": 95.0}
 
     from unittest.mock import AsyncMock
@@ -706,7 +708,8 @@ async def test_pre_correlation_node_skips_dispute_generation(
             config,
         )
 
-    disputes_after = len(await dispute_repo.list_disputes())
+    disputes_after, _ = await dispute_repo.list_disputes()
+    disputes_after = len(disputes_after)
     assert disputes_after == disputes_before
     mock_workflow_delay.assert_not_called()
 
@@ -1176,3 +1179,73 @@ async def test_second_pause_for_customer_reply_is_noop(db_session: AsyncSession)
     assert sla.paused_at is not None
     # SQLite may strip tzinfo; compare wall-clock time only.
     assert sla.paused_at.replace(tzinfo=None) == first_paused_at.replace(tzinfo=None)
+
+
+def test_sla_monitoring_statuses_include_payment_review():
+    """WAITING_PAYMENT_REVIEW must be monitored or SLA stays stuck at create-time 0%."""
+    assert "WAITING_PAYMENT_REVIEW" in SLA_MONITORING_STATUSES
+    assert "WAITING_ASSOCIATE_APPROVAL" in SLA_MONITORING_STATUSES
+    assert "ESCALATED" in SLA_MONITORING_STATUSES
+
+
+@pytest.mark.asyncio
+async def test_calculate_progress_advances_for_waiting_payment_review(
+    db_session: AsyncSession,
+):
+    """Payment-review disputes keep the SLA clock running (not paused by status alone)."""
+    dispute, sla, sla_service, _ = await _create_dispute_with_sla(
+        db_session,
+        status="WAITING_PAYMENT_REVIEW",
+        dispute_category="PAYMENT_NOT_REFLECTED",
+    )
+    sla.started_at = datetime.now(UTC) - timedelta(hours=6)
+    sla.current_percentage = 0.0
+    await sla_service.sla_repo.update_sla(sla)
+
+    updated = await sla_service.calculate_progress(dispute.id)
+    assert updated is not None
+    assert updated.is_paused is False
+    # 6h of 12h payment SLA ≈ 50%
+    assert updated.current_percentage == pytest.approx(50.0, abs=1.0)
+    assert updated.status == "ON_TRACK"
+
+
+@pytest.mark.asyncio
+async def test_get_sla_recalculates_stale_percentage(db_session: AsyncSession):
+    """GET /sla must recompute progress so the UI is not stuck on stored 0%."""
+    from src.core.services.dispute_service import DisputeService
+    from src.core.services.workflow_context_service import WorkflowContextService
+    from src.data.repositories.other_repositories import (
+        CommentRepository,
+        EvidenceSnapshotRepository,
+    )
+    from src.data.repositories.workflow_context_repository import (
+        WorkflowContextRepository,
+    )
+
+    dispute, sla, sla_service, _ = await _create_dispute_with_sla(
+        db_session,
+        status="WAITING_PAYMENT_REVIEW",
+        dispute_category="PAYMENT_NOT_REFLECTED",
+    )
+    sla.started_at = datetime.now(UTC) - timedelta(hours=3)
+    sla.current_percentage = 0.0
+    await sla_service.sla_repo.update_sla(sla)
+
+    activity_repo = ActivityRepository(db_session)
+    dispute_service = DisputeService(
+        DisputeRepository(db_session),
+        activity_repo,
+        CommentRepository(db_session),
+        CommunicationRepository(db_session),
+        SLARepository(db_session),
+        WorkflowContextService(
+            WorkflowContextRepository(db_session), AuditService(activity_repo)
+        ),
+        EvidenceSnapshotRepository(db_session),
+        sla_service,
+    )
+
+    live_sla = await dispute_service.get_sla(dispute.id)
+    assert live_sla.current_percentage == pytest.approx(25.0, abs=1.0)
+    assert live_sla.status == "ON_TRACK"

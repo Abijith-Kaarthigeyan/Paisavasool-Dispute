@@ -1,7 +1,7 @@
+from datetime import datetime
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
-from fastapi.responses import Response
+from fastapi import APIRouter, Depends, Query, Response
 
 from src.api.dependencies import (
     get_case_attachment_service,
@@ -21,13 +21,39 @@ router = APIRouter(prefix="/cases", tags=["Case Management"])
 
 @router.get("", response_model=list[CaseResponse])
 async def list_cases(
+    response: Response,
+    status: str | None = Query(None, description="Filter by case status"),
+    search: str | None = Query(
+        None, description="Search by case number, customer email, or email subject"
+    ),
+    created_at_from: datetime | None = Query(
+        None, description="Created-at range start"
+    ),
+    created_at_to: datetime | None = Query(None, description="Created-at range end"),
+    sort_by: str | None = Query(
+        None,
+        description="Allowlisted sort column: created_at, case_number, customer_email, status",
+    ),
+    sort_order: str | None = Query(
+        "desc", description="Sort direction: asc or desc (default desc)"
+    ),
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
     current_user: TokenPayload = Depends(require_finance),
     case_service: CaseService = Depends(get_case_service),
 ):
     """Retrieves a paginated list of cases."""
-    cases = await case_service.list_cases(limit=limit, offset=offset)
+    cases, total = await case_service.list_cases(
+        status=status,
+        search=search,
+        created_at_from=created_at_from,
+        created_at_to=created_at_to,
+        sort_by=sort_by,
+        sort_order=sort_order,
+        limit=limit,
+        offset=offset,
+    )
+    response.headers["X-Total-Count"] = str(total)
     return [CaseResponse.model_validate(c) for c in cases]
 
 

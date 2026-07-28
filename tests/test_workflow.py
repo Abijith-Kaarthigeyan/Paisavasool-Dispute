@@ -78,18 +78,20 @@ async def test_triage_agent_normal_flow(mock_openrouter_success):
 @pytest.mark.asyncio
 async def test_triage_agent_regex_fallback():
     """Tests the triage agent uses regex fallback when LLM keys are absent/offline."""
-    with patch("src.core.config.settings.settings.OPENROUTER_API_KEY", ""):
-        with patch("src.core.config.settings.settings.GEMINI_API_KEY", ""):
-            with patch("src.core.config.settings.settings.GROQ_API_KEY", ""):
-                res = await DisputeTriageAgent.triage_communication(
-                    subject="INV-1001 payment query",
-                    body="I already paid INV-1001. Please check transaction cleared.",
-                )
+    with (
+        patch("src.core.config.settings.settings.OPENROUTER_API_KEY", ""),
+        patch("src.core.config.settings.settings.GEMINI_API_KEY", ""),
+        patch("src.core.config.settings.settings.GROQ_API_KEY", ""),
+    ):
+        res = await DisputeTriageAgent.triage_communication(
+            subject="INV-1001 payment query",
+            body="I already paid INV-1001. Please check transaction cleared.",
+        )
 
-                assert res["confidence"] == 75.0
-                assert len(res["invoices"]) == 1
-                assert res["invoices"][0]["invoice_number"] == "INV-1001"
-                assert "PAYMENT_ALREADY_DONE" in res["invoices"][0]["dispute_types"]
+        assert res["confidence"] == 75.0
+        assert len(res["invoices"]) == 1
+        assert res["invoices"][0]["invoice_number"] == "INV-1001"
+        assert "PAYMENT_ALREADY_DONE" in res["invoices"][0]["dispute_types"]
 
 
 def test_invoice_number_normalization():
@@ -201,7 +203,7 @@ async def test_dispute_generation_and_sla_creation(
 
         # Check DB
         dispute_repo = DisputeRepository(db_session)
-        disputes = await dispute_repo.list_disputes()
+        disputes, _ = await dispute_repo.list_disputes()
         disp = next(d for d in disputes if d.case_id == case.id)
         assert disp.invoice_number == "INV-1001"
         assert disp.dispute_category == "AMENDMENT"

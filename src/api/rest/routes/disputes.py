@@ -1,6 +1,7 @@
+from datetime import datetime
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from src.api.dependencies import (
     get_associate_communication_service,
@@ -43,6 +44,7 @@ require_finance_or_manager = require_roles(
 
 @router.get("", response_model=list[DisputeResponse])
 async def list_disputes(
+    response: Response,
     customer_id: UUID | None = Query(None),
     status: str | None = Query(None),
     category: str | None = Query(None, description="Filter by dispute category"),
@@ -56,6 +58,22 @@ async def list_disputes(
     exclude_statuses: str | None = Query(
         None, description="Comma-separated statuses to exclude"
     ),
+    created_at_from: datetime | None = Query(
+        None, description="Created-at range start"
+    ),
+    created_at_to: datetime | None = Query(None, description="Created-at range end"),
+    opened_at_from: datetime | None = Query(None, description="Opened-at range start"),
+    opened_at_to: datetime | None = Query(None, description="Opened-at range end"),
+    sort_by: str | None = Query(
+        None,
+        description=(
+            "Allowlisted sort column: created_at, opened_at, dispute_number, "
+            "invoice_number, status, dispute_category"
+        ),
+    ),
+    sort_order: str | None = Query(
+        "desc", description="Sort direction: asc or desc (default desc)"
+    ),
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
     current_user: TokenPayload = Depends(require_finance),
@@ -67,7 +85,7 @@ async def list_disputes(
         if exclude_statuses
         else None
     )
-    disputes = await dispute_service.list_disputes_for_user(
+    disputes, total = await dispute_service.list_disputes_for_user(
         role=current_user.role,
         user_id=current_user.sub,
         customer_id=customer_id,
@@ -79,9 +97,16 @@ async def list_disputes(
         sla_status=sla_status,
         has_assignee=has_assignee,
         exclude_statuses=excluded,
+        created_at_from=created_at_from,
+        created_at_to=created_at_to,
+        opened_at_from=opened_at_from,
+        opened_at_to=opened_at_to,
+        sort_by=sort_by,
+        sort_order=sort_order,
         limit=limit,
         offset=offset,
     )
+    response.headers["X-Total-Count"] = str(total)
     return [DisputeResponse.model_validate(d) for d in disputes]
 
 

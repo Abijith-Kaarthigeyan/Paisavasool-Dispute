@@ -35,8 +35,9 @@ async def test_case_repository(db_session: AsyncSession):
     assert fetched.id == case.id
 
     # List cases
-    cases_list = await repo.list_cases()
+    cases_list, total = await repo.list_cases()
     assert len(cases_list) >= 1
+    assert total >= 1
 
 
 @pytest.mark.asyncio

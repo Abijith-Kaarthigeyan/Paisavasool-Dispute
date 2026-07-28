@@ -1,3 +1,4 @@
+from datetime import datetime
 from uuid import UUID
 
 from src.core.exceptions.business_exceptions import (
@@ -5,6 +6,7 @@ from src.core.exceptions.business_exceptions import (
     ForbiddenException,
     SLADetailsNotFoundException,
 )
+from src.core.services.sla_service import SLAService
 from src.core.services.workflow_context_service import WorkflowContextService
 from src.data.models.postgres.activity import DisputeActivity
 from src.data.models.postgres.comment import DisputeComment
@@ -34,6 +36,7 @@ class DisputeService:
         sla_repo: SLARepository,
         workflow_context_service: WorkflowContextService,
         evidence_repo: EvidenceSnapshotRepository,
+        sla_service: SLAService | None = None,
     ):
         self.dispute_repo = dispute_repo
         self.activity_repo = activity_repo
@@ -42,6 +45,7 @@ class DisputeService:
         self.sla_repo = sla_repo
         self.workflow_context_service = workflow_context_service
         self.evidence_repo = evidence_repo
+        self.sla_service = sla_service
 
     async def list_disputes(
         self,
@@ -55,9 +59,15 @@ class DisputeService:
         sla_status: str | None = None,
         has_assignee: bool | None = None,
         exclude_statuses: list[str] | None = None,
+        created_at_from: datetime | None = None,
+        created_at_to: datetime | None = None,
+        opened_at_from: datetime | None = None,
+        opened_at_to: datetime | None = None,
+        sort_by: str | None = None,
+        sort_order: str | None = None,
         limit: int = 100,
         offset: int = 0,
-    ) -> list[Dispute]:
+    ) -> tuple[list[Dispute], int]:
         return await self.dispute_repo.list_disputes(
             customer_id=customer_id,
             status=status,
@@ -68,6 +78,12 @@ class DisputeService:
             sla_status=sla_status,
             has_assignee=has_assignee,
             exclude_statuses=exclude_statuses,
+            created_at_from=created_at_from,
+            created_at_to=created_at_to,
+            opened_at_from=opened_at_from,
+            opened_at_to=opened_at_to,
+            sort_by=sort_by,
+            sort_order=sort_order,
             limit=limit,
             offset=offset,
         )
@@ -86,9 +102,15 @@ class DisputeService:
         sla_status: str | None = None,
         has_assignee: bool | None = None,
         exclude_statuses: list[str] | None = None,
+        created_at_from: datetime | None = None,
+        created_at_to: datetime | None = None,
+        opened_at_from: datetime | None = None,
+        opened_at_to: datetime | None = None,
+        sort_by: str | None = None,
+        sort_order: str | None = None,
         limit: int = 100,
         offset: int = 0,
-    ) -> list[Dispute]:
+    ) -> tuple[list[Dispute], int]:
         if role == RoleName.FINANCE_ASSOCIATE:
             return await self.dispute_repo.list_by_assigned_associate(
                 user_id,
@@ -99,6 +121,12 @@ class DisputeService:
                 search=search,
                 sla_status=sla_status,
                 exclude_statuses=exclude_statuses,
+                created_at_from=created_at_from,
+                created_at_to=created_at_to,
+                opened_at_from=opened_at_from,
+                opened_at_to=opened_at_to,
+                sort_by=sort_by,
+                sort_order=sort_order,
                 limit=limit,
                 offset=offset,
             )
@@ -112,12 +140,19 @@ class DisputeService:
             sla_status=sla_status,
             has_assignee=has_assignee,
             exclude_statuses=exclude_statuses,
+            created_at_from=created_at_from,
+            created_at_to=created_at_to,
+            opened_at_from=opened_at_from,
+            opened_at_to=opened_at_to,
+            sort_by=sort_by,
+            sort_order=sort_order,
             limit=limit,
             offset=offset,
         )
 
     async def list_assigned_disputes(self, user_id: UUID) -> list[Dispute]:
-        return await self.dispute_repo.list_by_assigned_associate(user_id)
+        disputes, _ = await self.dispute_repo.list_by_assigned_associate(user_id)
+        return disputes
 
     def verify_associate_access(
         self, dispute: Dispute, role: RoleName, user_id: UUID
@@ -175,6 +210,12 @@ class DisputeService:
         return await self.comm_repo.get_communications_for_dispute(dispute_id)
 
     async def get_sla(self, dispute_id: UUID) -> DisputeSLA:
+        """Return live SLA progress. Recalculates so UI is not stuck on stale stored %."""
+        if self.sla_service is not None:
+            sla = await self.sla_service.calculate_progress(dispute_id)
+            if sla:
+                return sla
+
         sla = await self.sla_repo.get_by_dispute_id(dispute_id)
         if not sla:
             raise SLADetailsNotFoundException(
